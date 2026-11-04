@@ -128,11 +128,41 @@ pub struct Settings {
     /// 用户点开设置或关掉后置 false，不再弹。
     pub calendar_prompt: bool,
     pub calendar_auto_sync: bool,
+    /// 关于页「支持」卡片的三行文案，用户可自行改写。
+    /// settings.txt 里换行存成 \n，读回时还原。
+    pub support_eyebrow: String,
+    pub support_title: String,
+    pub support_body: String,
+}
+
+/// 支持卡片的默认文案：小字、标题、正文（正文可换行）。
+pub const SUPPORT_DEFAULT_EYEBROW: &str = "岛仔 · 陪伴版";
+pub const SUPPORT_DEFAULT_TITLE: &str = "陪你把日子过慢";
+pub const SUPPORT_DEFAULT_BODY: &str = "不急，不催。\n每一次专注、每一杯水，都算数。";
+
+/// settings.txt 是单行 key=value：换行和反斜杠转义后再存。
+fn encode_support_text(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('\n', "\\n")
+}
+
+pub(crate) fn decode_support_text(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' { out.push(c); continue; }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('\\') => out.push('\\'),
+            Some(other) => { out.push('\\'); out.push(other); }
+            None => out.push('\\'),
+        }
+    }
+    out
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { display_id: String::new(), settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 8], page_order: [0,1,2,3,4,5,6,7], show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, notification_preview:false, notifications: true, sound: false, chime_style: crate::chime::Chime::default().index(), chime_volume: 70, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true }
+        Self { display_id: String::new(), settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 8], page_order: [0,1,2,3,4,5,6,7], show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, notification_preview:false, notifications: true, sound: false, chime_style: crate::chime::Chime::default().index(), chime_volume: 70, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, support_eyebrow: SUPPORT_DEFAULT_EYEBROW.into(), support_title: SUPPORT_DEFAULT_TITLE.into(), support_body: SUPPORT_DEFAULT_BODY.into() }
     }
 }
 
@@ -205,6 +235,9 @@ impl Settings {
                 "mail_ics" => s.mail_ics = match v.parse::<u32>().unwrap_or(15) { 5 => 5, 30 => 30, _ => 15 },
                 "calendar_prompt" => s.calendar_prompt = v != "0",
                 "calendar_auto_sync" => s.calendar_auto_sync = v != "0",
+                "support_eyebrow" => s.support_eyebrow = decode_support_text(&v).chars().take(60).collect(),
+                "support_title" => s.support_title = decode_support_text(&v).chars().take(60).collect(),
+                "support_body" => s.support_body = decode_support_text(&v).chars().take(240).collect(),
                 _ => {}
             }
         }
@@ -255,6 +288,9 @@ impl Settings {
                 ("ignored_mail_events".into(), serde_json::to_string(&self.ignored_mail_events).unwrap()),
                 ("calendar_prompt".into(), (self.calendar_prompt as u8).to_string()),
                 ("calendar_auto_sync".into(), (self.calendar_auto_sync as u8).to_string()),
+                ("support_eyebrow".into(), encode_support_text(&self.support_eyebrow)),
+                ("support_title".into(), encode_support_text(&self.support_title)),
+                ("support_body".into(), encode_support_text(&self.support_body)),
             ],
         );
     }

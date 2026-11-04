@@ -757,57 +757,58 @@ pub(crate) fn settings_label(ui:&mut egui::Ui,text:&str){
     ui.label(egui::RichText::new(text).size(11.5).color(settings_color(ctx,Color32::from_gray(185),Color32::from_gray(70))));
     ui.add_space(2.0);
 }
-fn support_author(ui:&mut egui::Ui){
-    let id=egui::Id::new("support-author-open");
-    let open=ui.ctx().data(|data|data.get_temp::<bool>(id).unwrap_or(false));
+fn support_author(ui:&mut egui::Ui,settings:&mut crate::model::Settings){
+    let id=egui::Id::new("support-author-edit");
+    let mut editing=ui.ctx().data(|data|data.get_temp::<bool>(id).unwrap_or(false));
     let dark=ui.visuals().dark_mode;
     let accent=if dark{Color32::from_rgb(182,163,245)}else{Color32::from_rgb(105,77,163)};
+    let weak=if dark{Color32::from_gray(158)}else{Color32::from_gray(112)};
     ui.scope(|ui|{
-    ui.set_min_height(225.0);
-    if !open {
-    egui::Frame::new().fill(if dark{Color32::from_rgb(42,37,53)}else{Color32::from_rgb(239,233,250)})
-        .corner_radius(10.0).show(ui,|ui|{
-            ui.set_min_width(ui.available_width());
-            ui.vertical_centered(|ui|{
-                ui.add(egui::Image::new(egui::include_image!("../assets/support/daozai-coffee.svg")).fit_to_exact_size(egui::vec2(211.0,110.0)));
+        ui.set_min_height(if editing{0.0}else{225.0});
+        // 编辑态把插图收小一点，保证三个输入框和按钮都不用滚动就能看到。
+        let art=if editing{egui::vec2(132.0,69.0)}else{egui::vec2(211.0,110.0)};
+        egui::Frame::new().fill(if dark{Color32::from_rgb(42,37,53)}else{Color32::from_rgb(239,233,250)})
+            .corner_radius(10.0).show(ui,|ui|{
+                ui.set_min_width(ui.available_width());
+                ui.vertical_centered(|ui|{
+                    ui.add(egui::Image::new(egui::include_image!("../assets/support/daozai-rest.svg")).fit_to_exact_size(art));
+                });
             });
-        });
-    ui.add_space(9.0);
-    ui.label(egui::RichText::new("小唐维护 · 岛仔陪伴").size(10.5).color(accent));
-    ui.label(egui::RichText::new("请小唐喝杯咖啡").size(19.0).strong());
-    ui.label("岛仔陪你认真生活，\n你的支持，陪小唐把它慢慢做好。");
-    } else {
-        let ctx=ui.ctx().clone();
-        ui.columns(2,|columns|{
-            for (i,(name,bytes,crop,color)) in [
-                ("微信支付",include_bytes!("../assets/support/support-wechat-original.jpg").as_slice(),[330.0,370.0,600.0],Color32::from_rgb(5,160,80)),
-                ("支付宝",include_bytes!("../assets/support/support-alipay-original.jpg").as_slice(),[200.0,660.0,860.0],Color32::from_rgb(22,120,255)),
-            ].into_iter().enumerate(){
-                let texture_id=egui::Id::new(("support-author-qr",i));
-                let texture=ctx.data_mut(|data|data.get_temp::<egui::TextureHandle>(texture_id)).unwrap_or_else(||{
-                    let image=image::load_from_memory(bytes).expect("内置收款码图片有效").to_rgba8();
-                    let texture=ctx.load_texture(name,egui::ColorImage::from_rgba_unmultiplied([image.width() as usize,image.height() as usize],image.as_raw()),egui::TextureOptions::LINEAR);
-                    ctx.data_mut(|data|data.insert_temp(texture_id,texture.clone()));texture
-                });
-                let size=texture.size_vec2();
-                let uv=egui::Rect::from_min_max(egui::pos2(crop[0]/size.x,crop[1]/size.y),egui::pos2((crop[0]+crop[2])/size.x,(crop[1]+crop[2])/size.y));
-                columns[i].vertical_centered(|ui|{
-                    ui.label(egui::RichText::new(name).color(color).strong());
-                    let side=ui.available_width().min(180.0);
-                    ui.add(egui::Image::new((texture.id(),egui::vec2(side,side))).uv(uv));
-                    ui.label(egui::RichText::new(if i==0{"打开微信扫一扫"}else{"打开支付宝扫一扫"}).size(11.0));
-                });
-            }
-        });
-    }
+        ui.add_space(if editing{6.0}else{9.0});
+        if editing {
+            ui.spacing_mut().item_spacing.y=2.0;
+            ui.label(egui::RichText::new("小字").size(11.0).color(weak));
+            let width=ui.available_width();
+            ui.add(egui::TextEdit::singleline(&mut settings.support_eyebrow).desired_width(width));
+            ui.add_space(3.0);
+            ui.label(egui::RichText::new("标题").size(11.0).color(weak));
+            ui.add(egui::TextEdit::singleline(&mut settings.support_title).desired_width(width));
+            ui.add_space(3.0);
+            ui.label(egui::RichText::new("正文（可以换行）").size(11.0).color(weak));
+            ui.add(egui::TextEdit::multiline(&mut settings.support_body).desired_width(width).desired_rows(3));
+            ui.add_space(3.0);
+            ui.horizontal(|ui|{
+                if ui.button("恢复默认文字").clicked(){
+                    settings.support_eyebrow=crate::model::SUPPORT_DEFAULT_EYEBROW.into();
+                    settings.support_title=crate::model::SUPPORT_DEFAULT_TITLE.into();
+                    settings.support_body=crate::model::SUPPORT_DEFAULT_BODY.into();
+                }
+                ui.label(egui::RichText::new("改完自动保存").size(11.0).color(weak));
+            });
+        } else {
+            ui.label(egui::RichText::new(&settings.support_eyebrow).size(10.5).color(accent));
+            ui.label(egui::RichText::new(&settings.support_title).size(19.0).strong());
+            ui.label(&settings.support_body);
+        }
     });
-    let button=egui::Button::new(egui::RichText::new(if open{"返回"}else{"请喝咖啡 · 支持作者"}).color(Color32::from_rgb(33,27,51)))
-        .fill(Color32::from_rgb(182,163,245)).corner_radius(8.0);
-    if ui.add_sized([ui.available_width(),32.0],button).clicked(){
-        ui.ctx().data_mut(|data|data.insert_temp(id,!open));
-    }
     ui.add_space(7.0);
-    ui.label(egui::RichText::new("完全自愿 · 感谢每一份支持 · 不影响功能使用").size(11.0).color(ui.visuals().weak_text_color()));
+    ui.horizontal(|ui|{
+        if ui.button(if editing{"完成"}else{"编辑文案"}).clicked(){
+            editing=!editing;
+            ui.ctx().data_mut(|data|data.insert_temp(id,editing));
+        }
+        ui.label(egui::RichText::new("完全自愿 · 文案可以随意改成你自己的话").size(11.0).color(ui.visuals().weak_text_color()));
+    });
 }
 pub(crate) fn settings_control_row(ui:&mut egui::Ui,title:&str,label_width:f32,controls:impl FnOnce(&mut egui::Ui)->egui::Response)->egui::Response{
     ui.horizontal(|ui|{
@@ -1474,7 +1475,7 @@ impl App {
                             });
                         });
                         settings_label(ui,"支持作者");
-                        settings_card(ui,support_author);
+                        settings_card(ui,|ui|support_author(ui,&mut self.settings));
                     }
                     }
                 });

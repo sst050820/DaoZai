@@ -2,15 +2,21 @@
 use eframe::egui;
 use std::{io::{Read, Write}, path::PathBuf, sync::{mpsc::{self, Receiver}, Arc, atomic::{AtomicBool, Ordering}}, time::Duration};
 
-const REPOSITORY: &str = "https://github.com/Renly1994/xiaotang-daozai";
-const API: &str = "https://api.github.com/repos/Renly1994/xiaotang-daozai/releases/latest";
-const RELEASES: &str = "https://github.com/Renly1994/xiaotang-daozai/releases/latest";
-const BACKUP_DOWNLOAD: &str = "https://hcnounojrizu.feishu.cn/wiki/MpfXwFGf8ijhitkfuxdcELdBnqg";
+/// 本站分支的发布仓库：只影响本仓库构建，原作者仓库保持不变。
+const REPOSITORY: &str = "https://github.com/sst050820/DaoZai";
+const API: &str = "https://api.github.com/repos/sst050820/DaoZai/releases/latest";
+const RELEASES: &str = "https://github.com/sst050820/DaoZai/releases/latest";
 
 #[derive(Clone, Debug)]
 struct Release { version: String, notes: String, page: String, package: Option<Package> }
 #[derive(Clone, Debug)]
-struct Package { url: String, size: u64, hash: String }
+struct Package {
+    url: String,
+    size: u64,
+    hash: String,
+    /// true 表示发布资产就是单个 daozai.exe（没有打包 zip）。
+    raw: bool,
+}
 enum Event { Checked(Result<Option<Release>, String>), Progress(f32), Ready(PathBuf), Installed, Failed(String) }
 
 #[derive(Default)]
@@ -209,8 +215,6 @@ impl State {
                         }
                         ui.add_space(2.0);
                         ui.horizontal(|ui| {
-                            ui.hyperlink_to(egui::RichText::new("飞书备用下载").size(11.5).color(theme::BLUE),BACKUP_DOWNLOAD);
-                            ui.label(egui::RichText::new("·").color(theme::DIM));
                             ui.hyperlink_to(egui::RichText::new("浏览器下载").size(11.5).color(theme::GRAY),&release.page);
                             ui.label(egui::RichText::new("·").color(theme::DIM));
                             ui.hyperlink_to(egui::RichText::new("查看发布说明").size(11.5).color(theme::GRAY),&release.page);
@@ -288,18 +292,21 @@ fn check() -> Result<Option<Release>, String> {
 
 fn release_info(value: &serde_json::Value, current: &str) -> Result<Option<Release>, String> {
     let Some(tag) = parse_release(value, current)? else { return Ok(None); };
-    let name = format!("Daozai-v{}-windows-x64.zip", tag.trim_start_matches('v'));
-    let expected = format!("{REPOSITORY}/releases/download/{tag}/{name}");
-    let package = value["assets"].as_array().and_then(|assets| assets.iter().find(|asset| asset["name"] == name))
-        .and_then(|asset| {
-            let hash = asset["digest"].as_str()?.strip_prefix("sha256:")?;
-            let size = asset["size"].as_u64()?;
-            (asset["browser_download_url"].as_str()? == expected && size > 0 && size <= 200 * 1024 * 1024
-                && hash.len() == 64 && hash.bytes().all(|c| c.is_ascii_hexdigit()))
-                .then(|| Package { url: expected, size, hash: hash.to_ascii_lowercase() })
-        });
+    let zip = format!("Daozai-v{}-windows-x64.zip", tag.trim_start_matches('v'));
+    // 优先用打包好的 zip；发布时只传了单个 exe 也能直接替换安装。
+    let package = package_asset(value, &zip, &format!("{REPOSITORY}/releases/download/{tag}/{zip}"), false)
+        .or_else(|| package_asset(value, "daozai.exe", &format!("{REPOSITORY}/releases/download/{tag}/daozai.exe"), true));
     Ok(Some(Release { page: format!("{REPOSITORY}/releases/tag/{tag}"), version: tag,
         notes: value["body"].as_str().unwrap_or("").to_owned(), package }))
+}
+
+fn package_asset(value: &serde_json::Value, name: &str, expected: &str, raw: bool) -> Option<Package> {
+    let asset = value["assets"].as_array()?.iter().find(|asset| asset["name"] == name)?;
+    let hash = asset["digest"].as_str()?.strip_prefix("sha256:")?;
+    let size = asset["size"].as_u64()?;
+    (asset["browser_download_url"].as_str()? == expected && size > 0 && size <= 200 * 1024 * 1024
+        && hash.len() == 64 && hash.bytes().all(|c| c.is_ascii_hexdigit()))
+        .then(|| Package { url: expected.to_owned(), size, hash: hash.to_ascii_lowercase(), raw })
 }
 
 fn download(release: &Release, tx: &mpsc::Sender<Event>, cancel: &AtomicBool) -> Result<PathBuf, String> {
@@ -309,12 +316,14 @@ fn download(release: &Release, tx: &mpsc::Sender<Event>, cancel: &AtomicBool) ->
     std::fs::create_dir_all(&work).map_err(|_| "无法创建更新缓存")?;
     let result = (|| {
         let response = http_agent()?
-            .get(&package.url).call().map_err(|_| "连接下载服务器失败，请检查网络或代理，或使用飞书备用下载")?;
+            .get(&package.url).call().map_err(|_| "连接下载服务器失败，请检查网络或代理")?;
         if !response.get_url().starts_with("https://") { return Err("更新下载未使用安全连接".into()); }
         let mut input = response.into_reader();
-        let mut output = std::fs::File::create(work.join("update.zip")).map_err(|_| "无法保存更新包")?;
+        let archive = if package.raw { "update.exe" } else { "update.zip" };
+        let mut output = std::fs::File::create(work.join(archive)).map_err(|_| "无法保存更新包")?;
         transfer(&mut input, &mut output, package, cancel, |progress| { let _ = tx.send(Event::Progress(progress)); })?;
         std::fs::write(work.join("apply.ps1"), concat!("\u{feff}", include_str!("../installer/update.ps1"))).map_err(|_| "无法准备更新程序")?;
+        std::fs::write(work.join("mode.txt"), if package.raw { "exe" } else { "zip" }).map_err(|_| "无法保存更新包类型")?;
         std::fs::write(work.join("version.txt"), release.version.trim_start_matches('v')).map_err(|_| "无法保存更新信息")?;
         std::fs::write(work.join("hash.txt"), &package.hash).map_err(|_| "无法保存校验信息")?;
         if cancel.load(Ordering::Relaxed) { return Err("下载已取消".into()); }
@@ -329,7 +338,7 @@ fn transfer(input: &mut impl Read, output: &mut impl Write, package: &Package, c
     let mut buffer = [0u8; 65536]; let mut total = 0u64;
     loop {
         if cancel.load(Ordering::Relaxed) { return Err("下载已取消".into()); }
-        let length = input.read(&mut buffer).map_err(|_| "下载中断或等待超时，请重试或使用飞书备用下载")?;
+        let length = input.read(&mut buffer).map_err(|_| "下载中断或等待超时，请重试")?;
         if length == 0 { break; }
         total += length as u64;
         if total > package.size { return Err("更新包大小不符，请重新下载".into()); }
@@ -476,9 +485,29 @@ mod tests {
         }
     }
     #[test]
+    fn falls_back_to_a_bare_exe_asset() {
+        let mut value = release("v0.6.40");
+        value["assets"] = serde_json::json!([{"name":"daozai.exe",
+            "browser_download_url":format!("{REPOSITORY}/releases/download/v0.6.40/daozai.exe"),
+            "size":456,"digest":format!("sha256:{}", "b".repeat(64))}]);
+        let parsed = release_info(&value, "0.6.39").unwrap().unwrap();
+        let package = parsed.package.expect("只有 exe 资产也要能更新");
+        assert!(package.raw);
+        assert_eq!(package.size, 456);
+        // 两种资产同时存在时优先用 zip，二次替换由脚本按 mode.txt 处理。
+        value["assets"] = serde_json::json!([
+            {"name":"daozai.exe","browser_download_url":format!("{REPOSITORY}/releases/download/v0.6.40/daozai.exe"),
+             "size":456,"digest":format!("sha256:{}", "b".repeat(64))},
+            {"name":"Daozai-v0.6.40-windows-x64.zip","browser_download_url":format!("{REPOSITORY}/releases/download/v0.6.40/Daozai-v0.6.40-windows-x64.zip"),
+             "size":789,"digest":format!("sha256:{}", "c".repeat(64))}]);
+        let package = release_info(&value, "0.6.39").unwrap().unwrap().package.expect("zip 优先");
+        assert!(!package.raw);
+        assert_eq!(package.size, 789);
+    }
+    #[test]
     fn download_rejects_truncation_corruption_excess_and_cancellation() {
         let data = b"verified update";
-        let package = Package { url: String::new(), size: data.len() as u64,
+        let package = Package { url: String::new(), size: data.len() as u64, raw: false,
             hash: ring::digest::digest(&ring::digest::SHA256, data).as_ref().iter().map(|b|format!("{b:02x}")).collect() };
         let cancel = AtomicBool::new(false); let mut output = Vec::new(); let mut progress = 0.0;
         transfer(&mut &data[..], &mut output, &package, &cancel, |value| progress = value).unwrap();
@@ -558,8 +587,8 @@ mod tests {
         let ctx = egui::Context::default();
         let mut app = crate::app::App::new(&ctx, Default::default());
         app.updates.result = Some(Ok(Some(Release { version: "v0.6.50".into(),
-            notes: "- 更新下载支持 Windows 系统代理\n- 连接失败及时提示，避免长时间停在 0%\n- 新增飞书备用下载入口".into(), page: RELEASES.into(),
-            package: Some(Package { url: String::new(), size: 100, hash: String::new() }) })));
+            notes: "- 更新下载支持 Windows 系统代理\n- 连接失败及时提示，避免长时间停在 0%".into(), page: RELEASES.into(),
+            package: Some(Package { url: String::new(), size: 100, hash: String::new(), raw: false }) })));
         app.updates.dialog_open = true;
         app.settings_tab = 9;
         app.settings_open = false;
@@ -582,7 +611,7 @@ mod tests {
             ("update-dialog", None, ""),
             ("update-connecting", Some(0.0), ""),
             ("update-downloading", Some(0.42), ""),
-            ("update-failed", None, "连接下载服务器失败，请检查网络或代理，或使用飞书备用下载"),
+            ("update-failed", None, "连接下载服务器失败，请检查网络或代理"),
         ] {
         app.updates.cancel = progress.map(|_| Arc::new(AtomicBool::new(false)));
         app.updates.progress = progress.unwrap_or_default();

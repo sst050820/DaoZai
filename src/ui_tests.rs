@@ -3659,31 +3659,34 @@ fn about_support_preview() {
         *capture.lock().unwrap()=Some(ctx.run(raw,|ctx|(viewport.viewport_ui_cb)(ctx)));
     });
     let mut raster=crate::preview_raster::Raster::new(690,560);
-    for dark in [true,false] { for open in [false,true] {
+    for dark in [true,false] { for editing in [false,true] {
         h.app.settings.settings_theme=if dark{crate::settings_theme::SettingsTheme::Dark}else{crate::settings_theme::SettingsTheme::Light};
-        h.ctx.data_mut(|data|data.insert_temp(egui::Id::new("support-author-open"),open));
+        h.ctx.data_mut(|data|data.insert_temp(egui::Id::new("support-author-edit"),editing));
         for frame in 0..4 {
             let root=h.ctx.run(Default::default(),|ctx|h.app.settings_ui(ctx,false));
             let child=output.lock().unwrap().take().unwrap();
             raster.update_textures(&root.textures_delta);raster.update_textures(&child.textures_delta);
             if frame==3 {
-                let has_wechat=child.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Text(text) if text.galley.text()=="微信支付"));
-                assert_eq!(has_wechat,open);
-                for label in [if open{"返回"}else{"请喝咖啡 · 支持作者"},"完全自愿 · 感谢每一份支持 · 不影响功能使用"] {
+                for label in [if editing{"完成"}else{"编辑文案"},"完全自愿 · 文案可以随意改成你自己的话"] {
                     let shape=child.shapes.iter().find(|shape|matches!(&shape.shape,egui::Shape::Text(text) if text.galley.text()==label)).expect("按钮和说明必须可见");
                     assert!(shape.clip_rect.contains_rect(shape.shape.visual_bounding_rect()),"默认窗口中内容不能被裁切：{label}");
+                }
+                let texts:Vec<String>=child.shapes.iter().filter_map(|shape|match &shape.shape{egui::Shape::Text(text)=>Some(text.galley.text().to_owned()),_=>None}).collect();
+                assert!(!texts.iter().any(|text|text=="微信支付"),"不再内置收款码");
+                if editing {
+                    assert!(texts.iter().any(|text|text=="恢复默认文字"),"编辑态要有恢复默认");
+                } else {
+                    for label in [crate::model::SUPPORT_DEFAULT_EYEBROW,crate::model::SUPPORT_DEFAULT_TITLE] { assert!(texts.iter().any(|text|text==label),"默认文案必须出现：{label}"); }
                 }
                 raster.buf.fill([0.0,0.0,0.0,1.0]);
                 raster.draw(&h.ctx.tessellate(child.shapes,child.pixels_per_point),child.pixels_per_point);
                 let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
-                image::save_buffer(dest.join(format!("about-{}-{}.png",if dark{"dark"}else{"light"},if open{"open"}else{"closed"})),&rgba,690,560,image::ColorType::Rgba8).unwrap();
+                image::save_buffer(dest.join(format!("about-{}-{}.png",if dark{"dark"}else{"light"},if editing{"edit"}else{"view"})),&rgba,690,560,image::ColorType::Rgba8).unwrap();
             }
             raster.free_textures(&root.textures_delta);raster.free_textures(&child.textures_delta);
         }
     } }
 }
-
-
 #[test]
 fn mail_report_open_settings_matrix() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());

@@ -1,4 +1,4 @@
-param([Parameter(Mandatory=$true)][string]$WorkPath, [Parameter(Mandatory=$true)][string]$TargetExe, [int]$ParentProcessId)
+﻿param([Parameter(Mandatory=$true)][string]$WorkPath, [Parameter(Mandatory=$true)][string]$TargetExe, [int]$ParentProcessId)
 $ErrorActionPreference = 'Stop'
 # 更新只使用当前 PowerShell 自带模块，避免继承其他终端版本的模块路径。
 $env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules')
@@ -24,17 +24,26 @@ try {
     if (-not (Test-Path -LiteralPath $target -PathType Leaf)) { throw '找不到当前程序。' }
     $version = (Get-Content -LiteralPath (Join-Path $workRoot 'version.txt') -Raw).Trim()
     if ($version -notmatch '^\d+\.\d+\.\d+$') { throw '更新版本号无效。' }
-    $archive = Join-Path $workRoot 'update.zip'
+    $mode = 'zip'
+    $modeFile = Join-Path $workRoot 'mode.txt'
+    if (Test-Path -LiteralPath $modeFile) { $mode = (Get-Content -LiteralPath $modeFile -Raw).Trim() }
+    if ($mode -notin @('zip','exe')) { throw '更新包类型无效。' }
+    $archive = Join-Path $workRoot $(if ($mode -eq 'exe') { 'update.exe' } else { 'update.zip' })
     $expectedHash = (Get-Content -LiteralPath (Join-Path $workRoot 'hash.txt') -Raw).Trim()
     if ($expectedHash -notmatch '^[a-fA-F0-9]{64}$' -or (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne $expectedHash) { throw '更新包校验失败。' }
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    $zip = [IO.Compression.ZipFile]::OpenRead($archive)
-    try {
-        $name = 'Daozai-v' + $version + '-windows-x64/daozai.exe'
-        $entries = @($zip.Entries | Where-Object {$_.FullName.Replace('\','/') -ceq $name})
-        if ($entries.Count -ne 1 -or $entries[0].Length -gt 200MB) { throw '更新包中缺少唯一的岛仔程序。' }
-        [IO.Compression.ZipFileExtensions]::ExtractToFile($entries[0], $staged)
-    } finally { $zip.Dispose() }
+    if ($mode -eq 'exe') {
+        if ((Get-Item -LiteralPath $archive).Length -gt 200MB) { throw '更新包中缺少岛仔程序。' }
+        Copy-Item -LiteralPath $archive -Destination $staged
+    } else {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $zip = [IO.Compression.ZipFile]::OpenRead($archive)
+        try {
+            $name = 'Daozai-v' + $version + '-windows-x64/daozai.exe'
+            $entries = @($zip.Entries | Where-Object {$_.FullName.Replace('\','/') -ceq $name})
+            if ($entries.Count -ne 1 -or $entries[0].Length -gt 200MB) { throw '更新包中缺少唯一的岛仔程序。' }
+            [IO.Compression.ZipFileExtensions]::ExtractToFile($entries[0], $staged)
+        } finally { $zip.Dispose() }
+    }
     $actual = [Diagnostics.FileVersionInfo]::GetVersionInfo($staged).FileVersion
     if ($actual -ne $version -and $actual -ne "$version.0") { throw '安装包版本不匹配。' }
     Set-Content -LiteralPath (Join-Path $workRoot 'ready') -Value 'ok'
