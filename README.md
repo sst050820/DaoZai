@@ -7,12 +7,12 @@
 
 Windows 桌面伙伴 · 音乐与歌词 · 邮件验证码 · 日程提醒 · AI 额度
 
-[![Release](https://img.shields.io/github/v/release/Renly1994/xiaotang-daozai?color=6d65ff&label=下载)](https://github.com/Renly1994/xiaotang-daozai/releases/latest)
+[![Release](https://img.shields.io/github/v/release/sst050820/DaoZai?color=6d65ff&label=下载)](https://github.com/sst050820/DaoZai/releases/latest)
 [![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4)](#安装与更新)
 [![License](https://img.shields.io/badge/License-MIT-3cbf91)](LICENSE)
-[![CI](https://github.com/Renly1994/xiaotang-daozai/actions/workflows/ci.yml/badge.svg)](https://github.com/Renly1994/xiaotang-daozai/actions/workflows/ci.yml)
+[![CI](https://github.com/sst050820/DaoZai/actions/workflows/ci.yml/badge.svg)](https://github.com/sst050820/DaoZai/actions/workflows/ci.yml)
 
-[下载 Windows 版](https://github.com/Renly1994/xiaotang-daozai/releases/latest) · [使用指南](docs/USAGE.md) · [更新记录](CHANGELOG.md) · [反馈问题](https://github.com/Renly1994/xiaotang-daozai/issues)
+[下载 Windows 版](https://github.com/sst050820/DaoZai/releases/latest) · [使用指南](docs/USAGE.md) · [更新记录](CHANGELOG.md) · [反馈问题](https://github.com/sst050820/DaoZai/issues)
 
 </div>
 
@@ -65,7 +65,7 @@ Windows 桌面伙伴 · 音乐与歌词 · 邮件验证码 · 日程提醒 · AI
 
 ## 安装与更新
 
-1. 前往 [Releases](https://github.com/Renly1994/xiaotang-daozai/releases/latest)，下载安装版 `Daozai-Setup-v0.6.50-x64.exe`。
+1. 前往 [Releases](https://github.com/sst050820/DaoZai/releases/latest)，下载安装版 `Daozai-Setup-v0.6.52-x64.exe`。
 2. 双击安装器，可修改安装位置、选择是否创建桌面快捷方式和开机自启，再点击「一键安装」。桌面快捷方式默认勾选，首次安装默认不开机自启；无需解压。
 3. 安装完成后打开「岛仔」，也可从桌面快捷方式启动。在托盘菜单打开设置，选择需要的功能。
 

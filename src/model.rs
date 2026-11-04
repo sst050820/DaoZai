@@ -136,9 +136,9 @@ pub struct Settings {
 }
 
 /// 支持卡片的默认文案：小字、标题、正文（正文可换行）。
-pub const SUPPORT_DEFAULT_EYEBROW: &str = "岛仔 · 陪伴版";
-pub const SUPPORT_DEFAULT_TITLE: &str = "陪你把日子过慢";
-pub const SUPPORT_DEFAULT_BODY: &str = "不急，不催。\n每一次专注、每一杯水，都算数。";
+pub const SUPPORT_DEFAULT_EYEBROW: &str = "碉堡了啦 · 陪着你";
+pub const SUPPORT_DEFAULT_TITLE: &str = "把日子过成喜欢的样子";
+pub const SUPPORT_DEFAULT_BODY: &str = "慢慢来，不着急。\n你认真生活的样子，很好看。";
 
 /// settings.txt 是单行 key=value：换行和反斜杠转义后再存。
 fn encode_support_text(value: &str) -> String {

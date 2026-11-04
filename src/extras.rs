@@ -758,57 +758,91 @@ pub(crate) fn settings_label(ui:&mut egui::Ui,text:&str){
     ui.add_space(2.0);
 }
 fn support_author(ui:&mut egui::Ui,settings:&mut crate::model::Settings){
-    let id=egui::Id::new("support-author-edit");
-    let mut editing=ui.ctx().data(|data|data.get_temp::<bool>(id).unwrap_or(false));
+    // 0=展示 1=编辑文案 2=收款码
+    let id=egui::Id::new("support-author-state");
+    let mut state=ui.ctx().data(|data|data.get_temp::<u8>(id).unwrap_or(0)).min(2);
     let dark=ui.visuals().dark_mode;
     let accent=if dark{Color32::from_rgb(182,163,245)}else{Color32::from_rgb(105,77,163)};
     let weak=if dark{Color32::from_gray(158)}else{Color32::from_gray(112)};
+    let card=if dark{Color32::from_rgb(42,37,53)}else{Color32::from_rgb(239,233,250)};
     ui.scope(|ui|{
-        ui.set_min_height(if editing{0.0}else{225.0});
-        // 编辑态把插图收小一点，保证三个输入框和按钮都不用滚动就能看到。
-        let art=if editing{egui::vec2(132.0,69.0)}else{egui::vec2(211.0,110.0)};
-        egui::Frame::new().fill(if dark{Color32::from_rgb(42,37,53)}else{Color32::from_rgb(239,233,250)})
-            .corner_radius(10.0).show(ui,|ui|{
+        ui.set_min_height(if state==1{0.0}else{225.0});
+        if state==2 {
+            egui::Frame::new().fill(card).corner_radius(10.0).show(ui,|ui|{
+                ui.set_min_width(ui.available_width());
+                ui.columns(2,|columns|{
+                    for (i,(name,bytes,color,hint)) in [
+                        ("微信支付",include_bytes!("../assets/support/support-wechat.jpg").as_slice(),Color32::from_rgb(5,160,80),"打开微信扫一扫"),
+                        ("支付宝",include_bytes!("../assets/support/support-alipay.jpg").as_slice(),Color32::from_rgb(22,120,255),"打开支付宝扫一扫"),
+                    ].into_iter().enumerate(){
+                        let texture_id=egui::Id::new(("support-qr",i));
+                        let ctx=columns[i].ctx().clone();
+                        let texture=ctx.data_mut(|data|data.get_temp::<egui::TextureHandle>(texture_id)).unwrap_or_else(||{
+                            let image=image::load_from_memory(bytes).expect("内置收款码图片有效").to_rgba8();
+                            let texture=ctx.load_texture(name,egui::ColorImage::from_rgba_unmultiplied([image.width() as usize,image.height() as usize],image.as_raw()),egui::TextureOptions::LINEAR);
+                            ctx.data_mut(|data|data.insert_temp(texture_id,texture.clone()));texture
+                        });
+                        columns[i].vertical_centered(|ui|{
+                            ui.label(egui::RichText::new(name).size(13.0).color(color).strong());
+                            let side=ui.available_width().min(150.0);
+                            ui.add(egui::Image::new((texture.id(),egui::vec2(side,side))));
+                            ui.label(egui::RichText::new(hint).size(11.0));
+                        });
+                    }
+                });
+            });
+        } else {
+            let art=if state==1{egui::vec2(132.0,69.0)}else{egui::vec2(211.0,110.0)};
+            egui::Frame::new().fill(card).corner_radius(10.0).show(ui,|ui|{
                 ui.set_min_width(ui.available_width());
                 ui.vertical_centered(|ui|{
                     ui.add(egui::Image::new(egui::include_image!("../assets/support/daozai-rest.svg")).fit_to_exact_size(art));
                 });
             });
-        ui.add_space(if editing{6.0}else{9.0});
-        if editing {
-            ui.spacing_mut().item_spacing.y=2.0;
-            ui.label(egui::RichText::new("小字").size(11.0).color(weak));
-            let width=ui.available_width();
-            ui.add(egui::TextEdit::singleline(&mut settings.support_eyebrow).desired_width(width));
-            ui.add_space(3.0);
-            ui.label(egui::RichText::new("标题").size(11.0).color(weak));
-            ui.add(egui::TextEdit::singleline(&mut settings.support_title).desired_width(width));
-            ui.add_space(3.0);
-            ui.label(egui::RichText::new("正文（可以换行）").size(11.0).color(weak));
-            ui.add(egui::TextEdit::multiline(&mut settings.support_body).desired_width(width).desired_rows(3));
-            ui.add_space(3.0);
-            ui.horizontal(|ui|{
-                if ui.button("恢复默认文字").clicked(){
-                    settings.support_eyebrow=crate::model::SUPPORT_DEFAULT_EYEBROW.into();
-                    settings.support_title=crate::model::SUPPORT_DEFAULT_TITLE.into();
-                    settings.support_body=crate::model::SUPPORT_DEFAULT_BODY.into();
-                }
-                ui.label(egui::RichText::new("改完自动保存").size(11.0).color(weak));
-            });
-        } else {
-            ui.label(egui::RichText::new(&settings.support_eyebrow).size(10.5).color(accent));
-            ui.label(egui::RichText::new(&settings.support_title).size(19.0).strong());
-            ui.label(&settings.support_body);
+            ui.add_space(if state==1{6.0}else{9.0});
+            if state==1 {
+                let field=ui.available_width()-46.0;
+                egui::Grid::new("support-edit").num_columns(2).spacing([6.0,4.0]).show(ui,|ui|{
+                    for (label,value) in [("小字",&mut settings.support_eyebrow),("标题",&mut settings.support_title)] {
+                        ui.label(egui::RichText::new(label).size(11.0).color(weak));
+                        ui.add_sized([field,24.0],egui::TextEdit::singleline(value));
+                        ui.end_row();
+                    }
+                    ui.label(egui::RichText::new("正文").size(11.0).color(weak));
+                    ui.add_sized([field,52.0],egui::TextEdit::multiline(&mut settings.support_body));
+                    ui.end_row();
+                });
+                ui.add_space(3.0);
+                ui.horizontal(|ui|{
+                    if ui.button("恢复默认文字").clicked(){
+                        settings.support_eyebrow=crate::model::SUPPORT_DEFAULT_EYEBROW.into();
+                        settings.support_title=crate::model::SUPPORT_DEFAULT_TITLE.into();
+                        settings.support_body=crate::model::SUPPORT_DEFAULT_BODY.into();
+                    }
+                    ui.label(egui::RichText::new("改完自动保存").size(11.0).color(weak));
+                });
+            } else {
+                ui.label(egui::RichText::new(&settings.support_eyebrow).size(10.5).color(accent));
+                ui.label(egui::RichText::new(&settings.support_title).size(19.0).strong());
+                ui.label(&settings.support_body);
+            }
         }
     });
     ui.add_space(7.0);
-    ui.horizontal(|ui|{
-        if ui.button(if editing{"完成"}else{"编辑文案"}).clicked(){
-            editing=!editing;
-            ui.ctx().data_mut(|data|data.insert_temp(id,editing));
-        }
-        ui.label(egui::RichText::new("完全自愿 · 文案可以随意改成你自己的话").size(11.0).color(ui.visuals().weak_text_color()));
-    });
+    let label=if state==1{"完成"}else if state==2{"返回"}else{"请喝咖啡 · 支持作者"};
+    let button=egui::Button::new(egui::RichText::new(label).color(Color32::from_rgb(33,27,51)))
+        .fill(Color32::from_rgb(182,163,245)).corner_radius(8.0);
+    if ui.add_sized([ui.available_width(),32.0],button).clicked(){
+        state=if state==0{2}else{0};
+    }
+    if state==0 {
+        ui.add_space(5.0);
+        ui.horizontal(|ui|{
+            if ui.small_button("编辑文案").clicked(){state=1;}
+            ui.label(egui::RichText::new("完全自愿 · 文案可以随意改成你自己的话").size(11.0).color(ui.visuals().weak_text_color()));
+        });
+    }
+    ui.ctx().data_mut(|data|data.insert_temp(id,state));
 }
 pub(crate) fn settings_control_row(ui:&mut egui::Ui,title:&str,label_width:f32,controls:impl FnOnce(&mut egui::Ui)->egui::Response)->egui::Response{
     ui.horizontal(|ui|{
