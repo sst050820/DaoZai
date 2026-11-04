@@ -354,6 +354,13 @@ impl App {
         self.quota.config.caps.insert("demo-4".into(),2000.0);
         self.quota.config.selected="demo-0".into();self.show_page(6);if self.settings_open{self.settings_tab=11;}
     }
+    /// 录制专用：DSH 账号还在，但本轮还没同步到读数（刚启动、读缓存失败）。
+    /// 用来核对「还没数」时环上不该出现假进度。
+    #[cfg(feature="record")]
+    pub fn quota_demo_pending(&mut self){
+        self.quota_demo("single");
+        self.quota.rows.insert("demo-3".into(),Err("DSH 还没有余额记录，先打开一次 DSH 再刷新".into()));
+    }
 }
 
 #[cfg(test)]

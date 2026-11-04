@@ -537,6 +537,7 @@ fn desktop_preview() {
     let dest = std::env::args().nth(2).unwrap_or_else(|| "desktop.png".into());
     let screen_w: usize = std::env::var("DAOZAI_SCREEN_W").ok().and_then(|v| v.parse().ok()).unwrap_or(1707);
     let screen_h: usize = std::env::var("DAOZAI_SCREEN_H").ok().and_then(|v| v.parse().ok()).unwrap_or(960);
+    let pending = std::env::var("DAOZAI_DESKTOP_PENDING").is_ok();
     let ppp = 2.0_f32;
     let ctx = egui::Context::default();
     let mut app = App::new(&ctx, Options { fetch_lyrics: false, pet_idle: 45.0 });
@@ -546,7 +547,7 @@ fn desktop_preview() {
     let win_left = ((screen_w as f32 - 640.0 * ppp) / 2.0).round();
     for frame in 0..75 {
         let t = frame as f64 / 60.0;
-        if frame == 0 { app.quota_demo("single"); app.quota_demo_focus("demo-3", None); }
+        if frame == 0 { if pending { app.quota_demo_pending(); } else { app.quota_demo("single"); app.quota_demo_focus("demo-3", None); } }
         app.show_page(6);
         let env = Env { t, clock: "10:28:00".into(), today: "2026-10-28".into(), date: "10月28日 周三".into(), battery: Some(76), charging: true, cursor: None, ..Default::default() };
         let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(640.0, 190.0))), time: Some(t), viewports: std::iter::once((egui::ViewportId::ROOT, egui::ViewportInfo { native_pixels_per_point: Some(ppp), ..Default::default() })).collect(), ..Default::default() };
