@@ -238,6 +238,9 @@ impl App {
                 self.pomo.remaining = self.phase_secs(self.pomo.phase);
             }
             self.pomo.running = !self.pomo.running;
+            // 开始计时响一次；暂停不响（暂停是主动操作，提醒容易烦人）。
+            // 到点的那一刻由 tick() 里的 alert 负责，切换阶段的结束音已经覆盖。
+            if self.pomo.running { self.chime(); }
         }
     }
 
@@ -246,6 +249,8 @@ impl App {
         self.pomo.phase = ph;
         self.pomo.remaining = self.phase_secs(ph);
         self.pomo.running = false;
+        // 手动切到休息/专注也算一次阶段开始，给一声提示音。
+        self.chime();
     }
 
     // ================= 饮水 =================

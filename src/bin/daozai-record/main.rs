@@ -488,6 +488,7 @@ fn main() {
         }
         region = fo.region.translate(Vec2::new(WX, 0.0)); // FrameOut 是窗口局部坐标
         for c in fo.cmds {
+            // 铃声只在真实 Windows 外壳里播放；录制器保持静音。
             if let Cmd::Media(m) = c {
                 media.apply(m, t);
             }

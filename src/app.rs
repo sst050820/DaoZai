@@ -116,6 +116,8 @@ pub enum Cmd {
     Reveal(PathBuf),
     Copy(String),
     Notify(String, String),
+    /// 播放一次提醒铃声（风格, 音量百分比）。
+    Chime(crate::chime::Chime, u32),
     RequestNotifications,
     DisconnectNotifications,
     ToggleAutostart,

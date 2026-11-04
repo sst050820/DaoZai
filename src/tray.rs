@@ -462,11 +462,12 @@ impl Tray {
         self.hwnd
     }
 
-    pub fn notify(&self,title:&str,body:&str,sound:bool) {
+    pub fn notify(&self,title:&str,body:&str) {
         let mut nid=NOTIFYICONDATAW {cbSize:std::mem::size_of::<NOTIFYICONDATAW>() as u32,hWnd:self.hwnd,uID:TRAY_UID,uFlags:NIF_INFO,dwInfoFlags:NIIF_INFO,..Default::default()};
         fill_tip(&mut nid.szInfoTitle,title);fill_tip(&mut nid.szInfo,body);
-        // NIIF_NOSOUND，默认安静提醒。
-        if !sound {nid.dwInfoFlags.0|=0x10;}
+        // 始终静音（NIIF_NOSOUND）：提示音由 chime 模块统一合成播放，
+        // 系统气泡音和自定义铃声同时响会像「响了两下」。
+        nid.dwInfoFlags.0|=0x10;
         unsafe{let _=Shell_NotifyIconW(NIM_MODIFY,&nid);}
     }
     pub fn sync(&self, state: State) {

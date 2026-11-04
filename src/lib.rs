@@ -13,6 +13,7 @@ pub mod app;
 pub mod bt;
 pub mod calendar;
 mod calendar_ui;
+pub mod chime;
 mod local_calendar;
 mod calendar_editor;
 pub mod glass;

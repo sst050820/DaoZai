@@ -208,11 +208,22 @@ impl App {
         };
         self.enqueue_alert(a, false);
     }
+    /// 播放一次提醒铃声；声音总开关关闭时什么都不做。
+    pub(crate) fn chime(&mut self) {
+        if !self.settings.sound {return;}
+        self.pending.push(Cmd::Chime(
+            crate::chime::Chime::from_index(self.settings.chime_style),
+            self.settings.chime_volume,
+        ));
+    }
     fn enqueue_alert(&mut self, a: Alert, system: bool) {
         // 通知仅保存在本次运行的内存中。
         if a.source==AlertSource::Internal {self.history.push_front(a.clone());}
         self.history.truncate(50);
         if self.settings.notifications {
+            // 系统 HUD（音量、大写锁定、蓝牙…）是随手操作的回显，不该每次都响；
+            // 真正需要人动手的提醒（喝水、专注、待办、邮件、会议、外部通知）才响铃。
+            if !a.is_hud() {self.chime();}
             if system && a.source==AlertSource::Internal {
                 self.pending
                     .push(Cmd::Notify(a.title.clone(), a.body.clone()));
@@ -1074,7 +1085,7 @@ impl App {
                         self.avoidance.settings(ui,&mut self.settings);
                         settings_label(ui,"声音与显示");
                         settings_card(ui,|ui|{
-                            setting_row(ui,"提醒声音","喝水、待办和专注提醒",&mut self.settings.sound);
+                            setting_row(ui,"提醒声音","喝水、待办、专注、邮件和新通知响铃",&mut self.settings.sound);
                             ui.separator();
                             setting_row(ui,"全屏时隐藏","游戏、视频和演示全屏时隐藏",&mut self.settings.hide_fullscreen);
                         });
@@ -1163,6 +1174,45 @@ impl App {
                             let before_apps=self.notification_apps.items.clone();
                             for (_,name,enabled) in &mut self.notification_apps.items {setting_row(ui,name,"",enabled);}
                             if before_apps!=self.notification_apps.items{self.notification_apps.save();}
+                        });
+                        settings_label(ui,"提醒铃声");
+                        settings_card(ui,|ui|{
+                            if !self.settings.sound {
+                                ui.label(egui::RichText::new("提醒声音已关闭，可在「常规」页打开。").size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
+                                ui.add_space(3.0);
+                            }
+                            ui.add_enabled_ui(self.settings.sound,|ui|{
+                                ui.label(egui::RichText::new("铃声风格").size(13.0));
+                                // 三列两行：六个选项排成整齐的网格，不会出现「5+1」的孤行。
+                                let gap=ui.spacing().item_spacing.x;
+                                let cell=((ui.available_width()-gap*2.0)/3.0).max(64.0);
+                                let mut chosen=None;
+                                for row in crate::chime::STYLES.chunks(3) {
+                                    ui.horizontal(|ui|{
+                                        for (style,name,tip) in row {
+                                            let selected=self.settings.chime_style==style.index();
+                                            let label=egui::RichText::new(*name).size(12.0).color(if selected{settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41))}else{settings_color(ctx,Color32::from_gray(210),Color32::from_gray(55))});
+                                            let button=egui::Button::new(label).min_size(egui::vec2(cell,26.0))
+                                                .fill(if selected{settings_color(ctx,Color32::from_rgb(45,105,165),Color32::from_rgb(209,226,248))}else{settings_color(ctx,Color32::from_rgb(50,50,54),Color32::from_rgb(228,231,236))})
+                                                .stroke(egui::Stroke::NONE).corner_radius(6.0);
+                                            if ui.add_sized([cell,26.0],button).on_hover_text(*tip).clicked(){chosen=Some(*style);}
+                                        }
+                                    });
+                                }
+                                if let Some(style)=chosen {
+                                    self.settings.chime_style=style.index();
+                                    self.pending.push(Cmd::Chime(style,self.settings.chime_volume));
+                                }
+                                ui.add_space(3.0);
+                                let mut volume=self.settings.chime_volume;
+                                if setting_number(ui,"铃声音量",&mut volume,10u32,100u32,"%",5.0){self.settings.chime_volume=volume;}
+                                ui.horizontal(|ui|{
+                                    if ui.add_sized([96.0,28.0],egui::Button::new("试听")).clicked(){
+                                        self.pending.push(Cmd::Chime(crate::chime::Chime::from_index(self.settings.chime_style),self.settings.chime_volume));
+                                    }
+                                    ui.label(egui::RichText::new("音量与系统音量叠加，不受岛仔静音影响").size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
+                                });
+                            });
                         });
                     }
                     7=>{

@@ -4185,3 +4185,72 @@ fn bluetooth_switch_clears_notices_and_restarts_with_fresh_baseline(){
     h.bt.clear();h.frame(vec![]);
     assert!(h.app.notice.as_ref().is_some_and(|a|a.title=="蓝牙设备") || h.app.alerts.iter().any(|a|a.title=="蓝牙设备"));
 }
+
+#[test]
+fn reminder_chime_respects_sound_switch_and_skips_system_hud(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    let rings=|cmds:&[crate::app::Cmd]|cmds.iter().any(|c|matches!(c,crate::app::Cmd::Chime(..)));
+    // 默认关闭：再重要的提醒也不出声。
+    assert!(!h.app.settings.sound);
+    h.app.alert("喝水时间到了","已经 45 分钟没喝水",2,true);h.frame(vec![]);
+    assert!(!rings(&h.cmds),"声音关闭时不应请求铃声");
+    // 打开后，常用提醒各响一次。
+    h.app.settings.sound=true;
+    for (title,body,page) in [("喝水时间到了","",2),("专注计时","该休息了",1),("待办到时间了","交周报",4),("今日饮水目标达成","2.0L",2)] {
+        h.cmds.clear();
+        h.app.alert(title,body,page,true);h.frame(vec![]);
+        assert!(rings(&h.cmds),"{title} 应该响铃");
+        assert!(h.cmds.iter().any(|c|matches!(c,crate::app::Cmd::Notify(t,_)if t==title)),"{title} 的系统通知不能被铃声顶掉");
+    }
+    // 系统 HUD 是操作回显，响了会吵。
+    for (title,body) in [("系统音量","40%"),("大写锁定","开"),("网络连接","已连接")] {
+        h.cmds.clear();
+        h.app.alert(title,body,0,true);h.frame(vec![]);
+        assert!(!rings(&h.cmds),"{title} 属于系统 HUD，不应响铃");
+    }
+}
+#[test]
+fn chime_style_and_volume_come_from_settings(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.settings.sound=true;h.app.settings.chime_style=crate::chime::Chime::Water.index();h.app.settings.chime_volume=35;
+    h.app.alert("喝水时间到了","",2,true);h.frame(vec![]);
+    let played=h.cmds.iter().find_map(|c|match c{crate::app::Cmd::Chime(style,volume)=>Some((*style,*volume)),_=>None}).expect("应播放铃声");
+    assert_eq!(played,(crate::chime::Chime::Water,35));
+    h.app.settings.save();let reloaded=crate::model::Settings::load();
+    assert_eq!(reloaded.chime_style,crate::chime::Chime::Water.index());
+    assert_eq!(reloaded.chime_volume,35);
+    assert!(reloaded.sound);
+}
+#[test]
+fn starting_focus_timer_gives_a_chime_but_pausing_does_not(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    let rings=|cmds:&[crate::app::Cmd]|cmds.iter().any(|c|matches!(c,crate::app::Cmd::Chime(..)));
+    h.app.settings.sound=true;h.app.show_page(1);h.hover(H::local(264.0,60.0),1.0);
+    h.cmds.clear();h.click(H::local(264.0,106.0));
+    assert!(h.app.pomo.running,"点击开始后应进入计时");
+    assert!(rings(&h.cmds),"开始专注应有提示音");
+    h.cmds.clear();h.click(H::local(264.0,106.0));
+    assert!(!h.app.pomo.running);
+    assert!(!rings(&h.cmds),"暂停是主动操作，不应发声");
+}
+
+
+#[test]
+#[ignore="按需检查提醒铃声设置卡的实际排版"]
+fn chime_settings_card_preview(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_CHIME_PREVIEW_DIR").expect("需指定预览目录"));std::fs::create_dir_all(&dest).unwrap();
+    for (tone,style,width) in [("dark",0u8,690.0f32),("dark-alert",5,690.0),("narrow",2,600.0)] {
+        let mut h=H::new();h.app.settings.sound=true;h.app.settings.chime_style=style;h.app.settings.chime_volume=70;
+        h.app.settings_tab=6;h.app.open_settings();h.ctx.set_embed_viewports(false);
+        let size=egui::vec2(width,1180.0);let ppp=1.25;
+        let output=std::sync::Arc::new(Mutex::new(None));let capture=output.clone();
+        egui::Context::set_immediate_viewport_renderer(move|ctx,mut viewport|{let id=viewport.ids.this;let raw=egui::RawInput{viewport_id:id,screen_rect:Some(Rect::from_min_size(Pos2::ZERO,size)),viewports:std::iter::once((id,egui::ViewportInfo{native_pixels_per_point:Some(ppp),focused:Some(true),..Default::default()})).collect(),focused:true,..Default::default()};*capture.lock().unwrap()=Some(ctx.run(raw,|ctx|(viewport.viewport_ui_cb)(ctx)));});
+        let (w,height)=((size.x*ppp)as u32,(size.y*ppp)as u32);let mut raster=crate::preview_raster::Raster::new(w as usize,height as usize);
+        for f in 0..5{let root=h.ctx.run(egui::RawInput::default(),|ctx|h.app.settings_ui(ctx,false));raster.update_textures(&root.textures_delta);let child=output.lock().unwrap().take().unwrap();raster.update_textures(&child.textures_delta);
+            if f==4{raster.buf.fill([0.0,0.0,0.0,1.0]);raster.draw(&h.ctx.tessellate(child.shapes,child.pixels_per_point),child.pixels_per_point);let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);image::save_buffer(dest.join(format!("chime-{tone}-{}.png",width as u32)),&rgba,w,height,image::ColorType::Rgba8).unwrap();}
+            raster.free_textures(&root.textures_delta);raster.free_textures(&child.textures_delta);
+        }
+    }
+}
+

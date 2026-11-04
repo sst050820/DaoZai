@@ -1,4 +1,4 @@
-﻿//! 持久化与状态模型。
+//! 持久化与状态模型。
 //!
 //! 文件布局与原工具同名同结构（原工具字符串中可见的路径与键名），但默认目录
 //! 用独立的 `%APPDATA%\Daozai`，避免与原工具的 `%APPDATA%\Nusa` 互相覆盖：
@@ -104,6 +104,9 @@ pub struct Settings {
     pub notification_preview:bool,
     pub notifications: bool,
     pub sound: bool,
+    /// 提醒铃声的风格（crate::chime::Chime 的下标）与音量百分比。
+    pub chime_style: u8,
+    pub chime_volume: u32,
     pub lyrics_enabled:bool,
     pub island_lyrics:bool,
     pub lyric_delay_ms:i32,
@@ -129,7 +132,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { display_id: String::new(), settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 8], page_order: [0,1,2,3,4,5,6,7], show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true }
+        Self { display_id: String::new(), settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 8], page_order: [0,1,2,3,4,5,6,7], show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, notification_preview:false, notifications: true, sound: false, chime_style: crate::chime::Chime::default().index(), chime_volume: 70, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true }
     }
 }
 
@@ -182,6 +185,8 @@ impl Settings {
                 "bluetooth_notifications" => s.bluetooth_notifications = v != "0",
                 "notifications" => s.notifications = v != "0",
                 "sound" => s.sound = v == "1",
+                "chime_style" => s.chime_style = v.parse::<u8>().unwrap_or(2).min(5),
+                "chime_volume" => s.chime_volume = v.parse::<u32>().unwrap_or(70).clamp(10, 100),
                 "lyrics_enabled" => s.lyrics_enabled=v!="0",
                 "island_lyrics" => s.island_lyrics=v=="1",
                 "lyric_delay_ms" => s.lyric_delay_ms=v.parse::<i32>().unwrap_or(-350).clamp(-5000,5000),
@@ -230,6 +235,8 @@ impl Settings {
                 ("bluetooth_notifications".into(), (self.bluetooth_notifications as u8).to_string()),
                 ("notifications".into(), (self.notifications as u8).to_string()),
                 ("sound".into(), (self.sound as u8).to_string()),
+                ("chime_style".into(), self.chime_style.to_string()),
+                ("chime_volume".into(), self.chime_volume.to_string()),
                 ("lyrics_enabled".into(),(self.lyrics_enabled as u8).to_string()),
                 ("island_lyrics".into(),(self.island_lyrics as u8).to_string()),
                 ("lyric_delay_ms".into(),self.lyric_delay_ms.to_string()),

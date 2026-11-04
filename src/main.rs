@@ -394,8 +394,11 @@ impl eframe::App for Shell {
                 },
                 Cmd::Copy(text)=>{ctx.copy_text(text);self.app.say("已复制");},
                 Cmd::Notify(title,body)=>{
-                    #[cfg(windows)] if let Some(tray)=&self.tray{tray.notify(&title,&body,self.app.settings.sound);}
+                    // 气泡一直用静音标志：提醒声由 Cmd::Chime 统一播放，
+                    // 否则系统托盘音和自定义铃声会前后叠在一起响两次。
+                    #[cfg(windows)] if let Some(tray)=&self.tray{tray.notify(&title,&body);}
                 },
+                Cmd::Chime(style,volume)=>{daozai::chime::play(style,volume);},
                 Cmd::RequestNotifications=>{
                     #[cfg(windows)] {self.app.settings.read_notifications=true;self.app.settings.save();self.incoming=None;match daozai::system::connect(){Ok(rx)=>{self.incoming=Some(rx);self.app.listener_status="正在请求 Windows 通知权限…".into();},Err(e)=>self.app.listener_status=format!("Windows 未允许读取通知：{}。需要相应的系统权限或应用身份。",e.code())}}
                 },
