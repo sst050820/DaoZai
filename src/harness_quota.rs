@@ -36,19 +36,17 @@ pub fn native_path() -> Option<PathBuf> {
 ///
 /// 映射（本版只读顶层字段，不展开 `accounting.books`）：
 /// - `value = lastBalance`，单位「元」；
-/// - caption 用 `todayUsage` 写「今日已用 N 元」，缺失则写「今日用量未知」，不编 0；
+/// - caption 只写余额本身。**不再用 `todayUsage`**：那是每天清零的当日消耗，
+///   放在「余额还剩多少」旁边容易被读成刻度的一部分；
 /// - mtime 距今超过 24 小时，caption 追加「（数据为 N 小时前）」，缓存陈旧不算失败。
 pub fn parse(v: &Value, mtime: Option<SystemTime>) -> Result<Snapshot, String> {
     let balance = match v["lastBalance"].as_f64() {
         Some(n) if n.is_finite() && n >= 0.0 => n,
         _ => return Err("DSH 还没有余额记录，先打开一次 DSH 再刷新".into()),
     };
-    // 余额本身没有分母；进度环用「今日已用 / 每日预算」，预算默认 10 元、可在设置里改。
-    let used = v["todayUsage"].as_f64().filter(|n| n.is_finite() && *n >= 0.0);
-    let mut caption = match used {
-        Some(used) => format!("今日已用 {:.2} 元", used),
-        None => "今日用量未知".to_string(),
-    };
+    // 余额本身没有分母：进度环的口径是「总额 − 余额」，总额默认 50 元、可在设置里改。
+    // `used` 留空，表示这个来源没有服务端的已用量，由 `ring` 按余额反推。
+    let mut caption = format!("账户余额 {:.2} 元", balance);
     // 缓存陈旧只标注、不报错：关掉 DSH 后数值停在最后一次刷新，用户需要知道它不是实时的。
     if let Some(mtime) = mtime {
         if let Ok(elapsed) = SystemTime::now().duration_since(mtime) {
@@ -62,7 +60,7 @@ pub fn parse(v: &Value, mtime: Option<SystemTime>) -> Result<Snapshot, String> {
         plan: "DSH".into(),
         windows: vec![],
         extra: vec![],
-        reading: Some(Reading { value: balance, unit: "元", caption, used, cap: None }),
+        reading: Some(Reading { value: balance, unit: "元", caption, used: None, cap: None }),
         at: chrono::Utc::now().timestamp(),
     })
 }
@@ -80,7 +78,9 @@ mod tests {
         let r = s.reading.as_ref().expect("应产出 Reading");
         assert_eq!(r.value, 22.877404);
         assert_eq!(r.unit, "元");
-        assert!(r.caption.contains("3.98"), "caption 应含两位小数今日用量：{}", r.caption);
+        assert!(r.caption.contains("22.88"), "caption 只描述余额，不再提今日用量：{}", r.caption);
+        assert!(!r.caption.contains("今日"), "余额场景不该再出现「今日」口径：{}", r.caption);
+        assert_eq!(r.used, None, "余额来源没有服务端已用量，进度由余额反推");
         assert_eq!(s.plan, "DSH");
     }
 
@@ -95,9 +95,9 @@ mod tests {
         ] {
             assert!(parse(&v, None).is_err(), "该输入应报错：{v}");
         }
-        // todayUsage 缺失不应导致失败，只把说明改成「未知」。
+        // todayUsage 缺失不再影响读数，说明里也不该冒出「未知」。
         let s = parse(&json!({"lastBalance": 22.88}), None).unwrap();
-        assert!(s.reading.as_ref().unwrap().caption.contains("今日用量未知"));
+        assert!(s.reading.as_ref().unwrap().caption.contains("22.88"));
     }
 
     #[test]

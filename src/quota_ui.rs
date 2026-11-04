@@ -80,16 +80,23 @@ fn default_cap(a:&Account,snapshot:Option<&Snapshot>)->Option<f64>{
 }
 fn ring(c:&Card,a:&Account,snapshot:Option<&Snapshot>,x:f32,y:f32,size:f32,colors:[Color32;2],cap:Option<f64>){
     let windows=snapshot.map(Snapshot::rings).unwrap_or_default();let dual=windows.len()>1;
-    // 余额/积分：有「已用 / 上限」就画进度；超过 100% 时溢出那截不延长外圈，而是绕进内圈，
-    // 两圈叠在一起——外圈永远停在满格，所以「刚好满」和「已经超了」一眼能分开。
+    // 余额/积分：一律画成「已用 / 上限」的进度环，超过 100% 时溢出那截不延长外圈，
+    // 而是绕进内圈，两圈叠在一起——外圈永远停在满格，「刚好满」和「已经超了」一眼能分开。
+    //
+    // 「已用」的口径按来源分开：额度类（WorkBuddy 的积分包）有服务端的已用量，用它；
+    // 余额类（DSH）只看余额本身——已用 = 上限 − 余额。余额来源不碰「今日用量」，
+    // 那个数每天清零，会把人误导成「这个环在量今天的消耗」。
     if let Some(reading)=snapshot.and_then(|s|s.reading.as_ref()){
         let col=colors[0];
         let stroke=(size*0.078).clamp(2.0,4.6);
         let radius=size/2.0-2.0;
-        let ratio=cap.and_then(|cap|reading.used.filter(|_|cap>0.0).map(|used|(used/cap) as f32));
+        let used=match (reading.used,reading.cap){
+            (Some(used),Some(natural))=>Some(used),
+            _=>reading.cap.map(|_|(cap.unwrap_or(reading.value.max(0.0))-reading.value).max(0.0)),
+        };
+        let ratio=cap.and_then(|cap|used.filter(|_|cap>0.0).map(|used|(used/cap) as f32));
         let start=-std::f32::consts::FRAC_PI_2;
-        // 底环按「已用比例」画一段暗弧，剩下的留空——余额来源才不会被一圈满环
-        // 误读成「已经用满」。没有上限比（没有进度口径）时才退回整圈底环当容器。
+        // 底环按「已用比例」画一段暗弧，剩下的留空：余额还多的时候，环本来就该大部分是空的。
         match ratio{
             Some(r)=>{
                 let lit=crate::paint::mix(col,Color32::BLACK,0.72);
@@ -268,7 +275,7 @@ impl App {
                         let changed=ui.add(egui::DragValue::new(&mut cap).speed(1.0).range(0.0..=1_000_000.0)).changed();
                         ui.label(egui::RichText::new(a.provider.cap_unit()).size(11.0));
                         if changed{if cap>0.0{self.quota.config.caps.insert(a.id.clone(),cap);}else{self.quota.config.caps.remove(&a.id);}}
-                        let hint=match a.provider{Provider::WorkBuddy=>"默认取购买总量，调小就能看到溢出内圈",_=>"默认每日 10 元，超出后内圈多绕一圈"};
+                        let hint=match a.provider{Provider::WorkBuddy=>"默认取购买总量，调小就能看到溢出内圈",_=>"默认按 50 元总额：已用 = 总额 − 余额"};
                         ui.label(egui::RichText::new(hint).size(11.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_gray(170),Color32::from_gray(85))));
                     });
                 }
@@ -346,7 +353,7 @@ impl App {
             (Provider::Codex,"个人",None),
             (Provider::Codex,"工作",None),
             (Provider::Claude,"Claude",None),
-            (Provider::Harness,"DSH",Some(Reading{value:22.88,unit:"元",caption:"今日已用 3.98 元".into(),used:Some(3.98),cap:None})),
+            (Provider::Harness,"DSH",Some(Reading{value:22.88,unit:"元",caption:"账户余额 22.88 元".into(),used:None,cap:None})),
             (Provider::WorkBuddy,"WorkBuddy",Some(Reading{value:478.0,unit:"分",caption:"7 个积分包 · 最近到期 12 月 1 日".into(),used:Some(2100.0),cap:Some(2578.0)})),
         ];
         for(i,(provider,alias,reading))in demo_accounts.into_iter().enumerate(){let id=format!("demo-{i}");self.quota.config.accounts.push(Account{id:id.clone(),provider,alias:alias.into(),source:format!("demo-{i}.json").into(),slot:None,enabled:true,pinned:mode=="multi"||i==0});let snapshot=if let Some(reading)=reading{Ok(Snapshot{plan:alias.into(),windows:vec![],extra:vec![],reading:Some(reading),at:chrono::Utc::now().timestamp()})}else{let payload=if provider==Provider::Codex{json!({"plan_type":if i==0{"pro"}else{"plus"},"rate_limit":{"primary_window":if mode=="single" && i==0{serde_json::Value::Null}else{json!({"used_percent":28+i*15,"limit_window_seconds":18000,"reset_at":reset})},"secondary_window":{"used_percent":56,"limit_window_seconds":604800,"reset_at":reset+200000}}})}else{json!({"five_hour":{"utilization":45,"resets_at":"2030-01-01T12:00:00Z"},"seven_day":{"utilization":27}})};quota::parse(provider,&payload)};self.quota.rows.insert(id,snapshot);}

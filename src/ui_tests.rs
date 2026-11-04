@@ -4264,11 +4264,12 @@ fn quota_reading_preview_renders_png() {
     let h=H::new();
     // 按真实额度页画布（PW x QUOTA_H）出图，否则看不出环有没有被卡片裁掉。
     let width=crate::app::PW as u32;let height=crate::app::QUOTA_H as u32;
-    // 三种绝对值读数：余额（未超上限）、积分（有天然总量）、余额（已超每日预算 → 内圈溢出）。
+    // 三种绝对值读数：余额（总额 50 元、已用 27.12）、积分（有天然总量）、
+    // 余额（余额见底 → 已用超过总额，内圈溢出）。
     let cases:[(&str,Provider,Reading);3]=[
-        ("harness",Provider::Harness,Reading{value:22.88,unit:"元",caption:"今日已用 3.98 元".into(),used:Some(3.98),cap:None}),
+        ("harness",Provider::Harness,Reading{value:22.88,unit:"元",caption:"账户余额 22.88 元".into(),used:None,cap:None}),
         ("workbuddy",Provider::WorkBuddy,Reading{value:478.0,unit:"分",caption:"7 个积分包 · 最近到期 12月1日".into(),used:Some(2100.0),cap:Some(2578.0)}),
-        ("overflow",Provider::Harness,Reading{value:22.88,unit:"元",caption:"今日已用 12.40 元".into(),used:Some(12.4),cap:None}),
+        ("overflow",Provider::Harness,Reading{value:0.0,unit:"元",caption:"账户余额 0.00 元".into(),used:None,cap:None}),
     ];
     let mut app=h.app;
     for (id,provider,reading) in &cases{

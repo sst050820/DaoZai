@@ -29,8 +29,8 @@ impl Provider {
     pub const ALL: [Self; 7] = [Self::Codex, Self::Claude, Self::Kimi, Self::GrokBot, Self::Gemini, Self::Harness, Self::WorkBuddy];
     pub fn name(self) -> &'static str { match self {Self::Codex=>"Codex",Self::Claude=>"Claude",Self::Kimi=>"Kimi",Self::GrokBot=>"Grok Bot",Self::Gemini=>"Gemini",Self::Harness=>"DeepSeek Harness",Self::WorkBuddy=>"WorkBuddy"} }
     /// 没有天然分母时用的默认上限（用户可在设置里改）。
-    /// DSH 的用量按天算，所以默认是「每日预算 10 元」；WorkBuddy 有购买总量，不用默认值。
-    pub fn default_cap(self) -> Option<f64> { match self {Self::Harness=>Some(10.0),_=>None} }
+    /// DSH 的环口径是「总额 − 余额」，所以默认按 50 元总额算；WorkBuddy 有购买总量，不用默认值。
+    pub fn default_cap(self) -> Option<f64> { match self {Self::Harness=>Some(50.0),_=>None} }
     /// 上限输入框的单位。
     pub fn cap_unit(self) -> &'static str { if self==Self::WorkBuddy {"分"} else {"元"} }
     fn parse(s: &str) -> Option<Self> {
