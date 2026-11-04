@@ -78,10 +78,19 @@ fn ring(c:&Card,a:&Account,snapshot:Option<&Snapshot>,x:f32,y:f32,size:f32,color
         let col=colors[0];
         let stroke=(size*0.078).clamp(2.0,4.6);
         let radius=size/2.0-2.0;
-        // 底环只作容器，长度不随数值变化。
-        c.ring(x,y,radius,stroke,crate::paint::mix(col,Color32::BLACK,0.72));
         let ratio=cap.and_then(|cap|reading.used.filter(|_|cap>0.0).map(|used|(used/cap) as f32));
         let start=-std::f32::consts::FRAC_PI_2;
+        // 底环按「已用比例」画一段暗弧，剩下的留空——余额来源才不会被一圈满环
+        // 误读成「已经用满」。没有上限比（没有进度口径）时才退回整圈底环当容器。
+        match ratio{
+            Some(r)=>{
+                let lit=crate::paint::mix(col,Color32::BLACK,0.72);
+                let end=start+std::f32::consts::TAU*r.min(1.0);
+                c.arc(x,y,radius,end,start+std::f32::consts::TAU,stroke,lit);
+                for a in [start,end]{c.circle(x+radius*a.cos(),y+radius*a.sin(),stroke/2.0,lit);}
+            }
+            None=>c.ring(x,y,radius,stroke,crate::paint::mix(col,Color32::BLACK,0.72)),
+        }
         if let Some(ratio)=ratio{
             // 底环与亮弧都按「中线半径 = radius、宽度 = stroke」走同一条折线描边
             // （见 paint::ring），外沿完全重合，亮环外侧不会漏出一圈底环的暗边。
