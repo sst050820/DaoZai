@@ -83,14 +83,19 @@ fn ring(c:&Card,a:&Account,snapshot:Option<&Snapshot>,x:f32,y:f32,size:f32,color
         let ratio=cap.and_then(|cap|reading.used.filter(|_|cap>0.0).map(|used|(used/cap) as f32));
         let start=-std::f32::consts::FRAC_PI_2;
         if let Some(ratio)=ratio{
+            // 底环与亮弧都按「中线半径 = radius、宽度 = stroke」走同一条折线描边
+            // （见 paint::ring），外沿完全重合，亮环外侧不会漏出一圈底环的暗边。
             if ratio>=1.0{c.ring(x,y,radius,stroke,col);}
             else if ratio>0.0{c.arc(x,y,radius,start,start+std::f32::consts::TAU*ratio,stroke,col);}
             if ratio>1.0{
-                let inner=radius-(stroke*2.6).max(10.0);
-                let inner_stroke=(stroke*0.72).max(2.2);
+                // 内圈只压住外圈的内半边：中线半径取「外圈半径 − 半个外圈宽度」，
+                // 内圈的外半幅正好盖在外圈内半幅上，两圈叠成一体，不再需要连接线。
                 let over=(ratio-1.0).min(1.0); // 再超也只绕满一圈，不编第三圈。
-                c.arc(x,y,inner,start,start+std::f32::consts::TAU*over,inner_stroke,OVER);
-                c.seg((x,y-radius+stroke*0.45),(x,y-inner-inner_stroke*0.45),inner_stroke*0.85,OVER);
+                let ri=radius-stroke*0.5;
+                let a1=start+std::f32::consts::TAU*over;
+                c.arc(x,y,ri,start,a1,stroke,OVER);
+                // 两端收圆头，像一段嵌进外圈里的胶囊，不是硬邦邦的方块。
+                for a in [start,a1]{c.circle(x+ri*a.cos(),y+ri*a.sin(),stroke*0.5,OVER);}
             }
         }
         if size<35.0{
@@ -98,9 +103,9 @@ fn ring(c:&Card,a:&Account,snapshot:Option<&Snapshot>,x:f32,y:f32,size:f32,color
         }else{
             // 数值按单位分别格式化：钱保留两位（22.88），积分取整（478），不共用一个格式。
             let value=if reading.unit=="分"{format!("{:.0}",reading.value)}else{format!("{:.2}",reading.value)};
-            // 数字自适应环内宽度：位数多的（22.88、12345.67）自动缩到不顶到环形为止；
-            // 有内圈时再收一点，别压到溢出环上。
-            let max_w=if ratio.is_some_and(|r|r>1.0){size*0.54}else{size*0.62};
+            // 数字自适应环内宽度：位数多的（22.88、12345.67）自动缩到不顶到环形为止。
+            // 内圈贴着外圈走，不进占数字的位置，所以溢出时不用再缩一档。
+            let max_w=size*0.62;
             let mut large=(size*0.34).min(22.0);
             while large>9.0 && c.text_w(&value,large,W::Bold)>max_w { large-=0.5; }
             c.centered_text(x,y,&value,large,W::Bold,theme::WHITE,H::Center);

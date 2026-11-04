@@ -173,8 +173,13 @@ impl<'a> Card<'a> {
     pub fn circle(&self, x: f32, y: f32, r: f32, color: Color32) {
         self.painter.circle_filled(self.pos(x, y), r * self.s, color);
     }
+    /// 圆环。这里的 r 是环的中线半径。
+    ///
+    /// 不用 `circle_stroke`：egui 把它按「描边全在圆外」(PathStroke::outside) 处理，
+    /// 环会整体外扩半个宽度，和用 `arc` 画的进度弧对不齐，亮弧外侧就漏出一圈暗边。
+    /// 这里直接走和 `arc` 同一条折线描边，两者的外沿才能严丝合缝。
     pub fn ring(&self, x: f32, y: f32, r: f32, width: f32, color: Color32) {
-        self.painter.circle_stroke(self.pos(x, y), r * self.s, Stroke::new(width * self.s, color));
+        self.arc(x, y, r, 0.0, TAU, width, color);
     }
     pub fn seg(&self, a: (f32, f32), b: (f32, f32), width: f32, color: Color32) {
         self.painter.line_segment([self.pos(a.0, a.1), self.pos(b.0, b.1)], Stroke::new(width * self.s, color));
