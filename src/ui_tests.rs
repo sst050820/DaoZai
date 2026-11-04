@@ -4269,24 +4269,28 @@ fn quota_reading_preview_renders_png() {
         ("workbuddy",Provider::WorkBuddy,Reading{value:478.0,unit:"分",caption:"7 个积分包 · 最近到期 12月1日".into()}),
     ];
     let mut app=h.app;
-    for (id,provider,reading) in cases{
-        app.quota.config.accounts.push(Account{id:id.into(),provider,alias:id.into(),source:format!("{id}.json").into(),slot:None,enabled:true,pinned:false});
-        app.quota.rows.insert(id.into(),Ok(Snapshot{plan:id.into(),windows:vec![],extra:vec![],reading:Some(reading),at:chrono::Utc::now().timestamp()}));
+    for (id,provider,reading) in &cases{
+        app.quota.config.accounts.push(Account{id:(*id).into(),provider:*provider,alias:(*id).into(),source:format!("{id}.json").into(),slot:None,enabled:true,pinned:false});
+        app.quota.rows.insert((*id).into(),Ok(Snapshot{plan:(*id).into(),windows:vec![],extra:vec![],reading:Some((*reading).clone()),at:chrono::Utc::now().timestamp()}));
     }
-    app.quota.config.selected="harness".into();
-    let output=h.ctx.run(egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(width as f32,height as f32))),..Default::default()},|ctx|{
-        egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx,|ui|{
-            let c=crate::paint::Card::new(ui,Pos2::ZERO,ui.max_rect());
-            app.page_quota(&c);
-        });
-    });
+    // 两种读数各渲一张：钱是五位数字，最容易顶到环形，必须单独看。
+    // 光栅器跨帧复用：第二帧的纹理增量是局部的，换新实例会报 unknown texture。
     let mut raster=crate::preview_raster::Raster::new(width as usize,height as usize);
-    raster.update_textures(&output.textures_delta);
-    raster.buf.fill([0.0,0.0,0.0,1.0]);
-    raster.draw(&h.ctx.tessellate(output.shapes,output.pixels_per_point),output.pixels_per_point);
-    let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
-    let out=dir.join("quota-reading-preview.png");
-    image::save_buffer(&out,&rgba,width,height,image::ColorType::Rgba8).unwrap();
-    assert!(out.is_file());
+    for (id,_,_) in cases{
+        app.quota.config.selected=id.into();
+        let output=h.ctx.run(egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(width as f32,height as f32))),..Default::default()},|ctx|{
+            egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx,|ui|{
+                let c=crate::paint::Card::new(ui,Pos2::ZERO,ui.max_rect());
+                app.page_quota(&c);
+            });
+        });
+        raster.update_textures(&output.textures_delta);
+        raster.buf.fill([0.0,0.0,0.0,1.0]);
+        raster.draw(&h.ctx.tessellate(output.shapes,output.pixels_per_point),output.pixels_per_point);
+        let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
+        let out=dir.join(format!("quota-reading-preview-{id}.png"));
+        image::save_buffer(&out,&rgba,width,height,image::ColorType::Rgba8).unwrap();
+        assert!(out.is_file());
+    }
 }
 

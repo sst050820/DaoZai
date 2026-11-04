@@ -80,9 +80,13 @@ fn ring(c:&Card,a:&Account,snapshot:Option<&Snapshot>,x:f32,y:f32,size:f32,color
         }else{
             // 数值按单位分别格式化：钱保留两位（22.88），积分取整（478），不共用一个格式。
             let value=if reading.unit=="分"{format!("{:.0}",reading.value)}else{format!("{:.2}",reading.value)};
-            let large=if reading.value>=1000.0||value.len()>5{22.0}else{28.0};
+            // 数字自适应环内宽度：位数多的（22.88、12345.67）自动缩到不顶到环形为止。
+            let max_w=size*0.62;
+            let mut large=(size*0.34).min(22.0);
+            while large>9.0 && c.text_w(&value,large,W::Bold)>max_w { large-=0.5; }
             c.centered_text(x,y,&value,large,W::Bold,theme::WHITE,H::Center);
-            c.centered_text(x,y+14.0,reading.unit,11.0,W::Semibold,theme::GRAY,H::Center);
+            let unit=large*0.46;
+            c.centered_text(x,y+large*0.5+unit*0.5+1.5,reading.unit,unit,W::Semibold,theme::GRAY,H::Center);
         }
         return;
     }
