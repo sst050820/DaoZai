@@ -425,10 +425,24 @@ impl Tray {
                 });
                 let ctx_ptr = Box::into_raw(ctx);
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, ctx_ptr as isize);
-                let added = add_icon(hwnd, hicon);
+                let mut added = add_icon(hwnd, hicon);
                 (*ctx_ptr).added.store(added, Ordering::Relaxed);
                 (*ctx_ptr).adds.store(1, Ordering::Relaxed);
                 let _ = ready_tx.send(Ok((hwnd.0 as isize, added)));
+                // 启动瞬间系统托盘未必收得下：资源管理器刚重启、上一个实例刚退出、
+                // 开机后 shell 还没就绪，NIM_ADD 都可能直接返回 FALSE，托盘图标就一直不出现。
+                // 这里在后台再补注册几次；之后收到 TaskbarCreated 广播时还会再补一次。
+                if !added {
+                    for _ in 0..10 {
+                        std::thread::sleep(Duration::from_millis(400));
+                        if add_icon(hwnd, hicon) {
+                            added = true;
+                            (*ctx_ptr).added.store(true, Ordering::Relaxed);
+                        }
+                        (*ctx_ptr).adds.fetch_add(1, Ordering::Relaxed);
+                        if added { break; }
+                    }
+                }
 
                 let mut msg = MSG::default();
                 while GetMessageW(&mut msg, None, 0, 0).as_bool() {
