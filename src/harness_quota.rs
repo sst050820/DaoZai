@@ -43,7 +43,9 @@ pub fn parse(v: &Value, mtime: Option<SystemTime>) -> Result<Snapshot, String> {
         Some(n) if n.is_finite() && n >= 0.0 => n,
         _ => return Err("DSH 还没有余额记录，先打开一次 DSH 再刷新".into()),
     };
-    let mut caption = match v["todayUsage"].as_f64().filter(|n| n.is_finite()) {
+    // 余额本身没有分母；进度环用「今日已用 / 每日预算」，预算默认 10 元、可在设置里改。
+    let used = v["todayUsage"].as_f64().filter(|n| n.is_finite() && *n >= 0.0);
+    let mut caption = match used {
         Some(used) => format!("今日已用 {:.2} 元", used),
         None => "今日用量未知".to_string(),
     };
@@ -60,7 +62,7 @@ pub fn parse(v: &Value, mtime: Option<SystemTime>) -> Result<Snapshot, String> {
         plan: "DSH".into(),
         windows: vec![],
         extra: vec![],
-        reading: Some(Reading { value: balance, unit: "元", caption }),
+        reading: Some(Reading { value: balance, unit: "元", caption, used, cap: None }),
         at: chrono::Utc::now().timestamp(),
     })
 }

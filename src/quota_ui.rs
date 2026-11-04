@@ -68,20 +68,39 @@ fn logo(c:&Card,provider:Provider,x:f32,y:f32,size:f32){
     let rect=egui::Rect::from_min_size(min,egui::Vec2::splat(pixels as f32/ppp));
     if let Some(texture)=logo_texture(ctx,provider,pixels){c.painter.image(texture.id(),rect,egui::Rect::from_min_max(egui::pos2(0.0,0.0),egui::pos2(1.0,1.0)),Color32::WHITE);}
 }
-fn ring(c:&Card,a:&Account,snapshot:Option<&Snapshot>,x:f32,y:f32,size:f32,colors:[Color32;2]){
+/// 「超出上限」的颜色：橙。和任何厂商主色都不撞，也不像报错的红。
+const OVER: Color32 = Color32::from_rgb(255, 148, 48);
+fn ring(c:&Card,a:&Account,snapshot:Option<&Snapshot>,x:f32,y:f32,size:f32,colors:[Color32;2],cap:Option<f64>){
     let windows=snapshot.map(Snapshot::rings).unwrap_or_default();let dual=windows.len()>1;
-    // 余额/积分：没有分母，只画一圈底色环 + 中心数值，绝不画成百分比弧。
+    // 余额/积分：有「已用 / 上限」就画进度；超过 100% 时溢出那截不延长外圈，而是绕进内圈，
+    // 两圈叠在一起——外圈永远停在满格，所以「刚好满」和「已经超了」一眼能分开。
     if let Some(reading)=snapshot.and_then(|s|s.reading.as_ref()){
         let col=colors[0];
-        // 底环只作容器，长度不随数值变化，避免给没有分母的读数编出假进度。
-        c.ring(x,y,size/2.0-2.0,(size*0.075).clamp(2.0,4.5),crate::paint::mix(col,Color32::BLACK,0.72));
+        let stroke=(size*0.078).clamp(2.0,4.6);
+        let radius=size/2.0-2.0;
+        // 底环只作容器，长度不随数值变化。
+        c.ring(x,y,radius,stroke,crate::paint::mix(col,Color32::BLACK,0.72));
+        let ratio=cap.and_then(|cap|reading.used.filter(|_|cap>0.0).map(|used|(used/cap) as f32));
+        let start=-std::f32::consts::FRAC_PI_2;
+        if let Some(ratio)=ratio{
+            if ratio>=1.0{c.ring(x,y,radius,stroke,col);}
+            else if ratio>0.0{c.arc(x,y,radius,start,start+std::f32::consts::TAU*ratio,stroke,col);}
+            if ratio>1.0{
+                let inner=radius-(stroke*2.6).max(10.0);
+                let inner_stroke=(stroke*0.72).max(2.2);
+                let over=(ratio-1.0).min(1.0); // 再超也只绕满一圈，不编第三圈。
+                c.arc(x,y,inner,start,start+std::f32::consts::TAU*over,inner_stroke,OVER);
+                c.seg((x,y-radius+stroke*0.45),(x,y-inner-inner_stroke*0.45),inner_stroke*0.85,OVER);
+            }
+        }
         if size<35.0{
             logo(c,a.provider,x,y,14.0); // 收起态 27px：只放图标，数字放不下。
         }else{
             // 数值按单位分别格式化：钱保留两位（22.88），积分取整（478），不共用一个格式。
             let value=if reading.unit=="分"{format!("{:.0}",reading.value)}else{format!("{:.2}",reading.value)};
-            // 数字自适应环内宽度：位数多的（22.88、12345.67）自动缩到不顶到环形为止。
-            let max_w=size*0.62;
+            // 数字自适应环内宽度：位数多的（22.88、12345.67）自动缩到不顶到环形为止；
+            // 有内圈时再收一点，别压到溢出环上。
+            let max_w=if ratio.is_some_and(|r|r>1.0){size*0.54}else{size*0.62};
             let mut large=(size*0.34).min(22.0);
             while large>9.0 && c.text_w(&value,large,W::Bold)>max_w { large-=0.5; }
             c.centered_text(x,y,&value,large,W::Bold,theme::WHITE,H::Center);
@@ -152,7 +171,9 @@ impl App {
             let alpha=layout.pet_clearance(crate::bar_layout::QUOTA+position);
             let faded=c.faded(alpha);let faded=if alpha<0.8{faded.ghost()}else{faded};let c=&faded;
             let a=&self.quota.config.accounts[*i];let x=cx+layout.x[crate::bar_layout::QUOTA+position].unwrap();
-            let snapshot=self.quota.rows.get(&a.id).and_then(|r|r.as_ref().ok());ring(c,a,snapshot,x,15.0,27.0,accent_colors(&self.quota.config,a));
+            let snapshot=self.quota.rows.get(&a.id).and_then(|r|r.as_ref().ok());
+            let cap=self.quota.config.caps.get(&a.id).copied().or_else(||snapshot.and_then(|s|s.reading.as_ref()).and_then(|r|r.cap)).or_else(||a.provider.default_cap());
+            ring(c,a,snapshot,x,15.0,27.0,accent_colors(&self.quota.config,a),cap);
             let mut same=self.quota.config.accounts.iter().filter(|other|other.provider==a.provider && other.enabled);
             if same.clone().count()>1{let n=same.position(|other|other.id==a.id).unwrap_or(0)+1;c.circle(x+10.0,24.0,4.5,Color32::from_gray(225));c.text(x+10.0,26.8,&n.to_string(),6.5,W::Bold,Color32::BLACK,H::Center);}
             let summary=snapshot.map(|s|s.rings().iter().map(|w|format!("{}剩余 {:.0}%",w.label,w.remaining)).collect::<Vec<_>>().join(" · ")).unwrap_or_else(||if self.quota.busy.contains(&a.id){"正在更新".into()}else{"额度暂不可用".into()});
@@ -175,7 +196,10 @@ impl App {
         for (column,index)in indices.iter().skip(start).take(3).enumerate(){let a=&self.quota.config.accounts[*index];let x=59.0+column as f32*99.0;let on=*index==selected;let colors=accent_colors(&self.quota.config,a);let color=colors[0];let(r,b)=crate::paint::capsule(c,x,30.0,94.0,21.0,&format!("quota-account-{}",a.id),if on{Color32::from_rgb(color.r()/5,color.g()/5,color.b()/5)}else{Color32::BLACK},theme::BTN_HOVER);let text=b.fit(&a.alias,10.5,W::Regular,84.0);b.text(x+47.0,45.0,&text,10.5,W::Regular,if on{colors[1]}else{theme::GRAY},H::Center);if r.on_hover_text(format!("{} · {}",a.provider.name(),a.alias)).clicked(){picked=Some(*index);}}
         if let Some(i)=picked{self.quota.config.selected=self.quota.config.accounts[i].id.clone();self.quota.config.save();}
         let a=&self.quota.config.accounts[selected];let result=self.quota.rows.get(&a.id);let snapshot=result.and_then(|r|r.as_ref().ok());
-        let colors=accent_colors(&self.quota.config,a);ring(c,a,snapshot,103.0,89.0,70.0,colors);
+        let colors=accent_colors(&self.quota.config,a);
+        // 上限：用户设的优先，其次来源自带的总量，最后才用厂商默认值。
+        let cap=self.quota.config.caps.get(&a.id).copied().or_else(||snapshot.and_then(|s|s.reading.as_ref()).and_then(|r|r.cap)).or_else(||a.provider.default_cap());
+        ring(c,a,snapshot,105.0,97.0,88.0,colors,cap);
         let raw_plan=snapshot.map(|s|s.plan.as_str()).unwrap_or_default();let plan=match raw_plan{"pro"|"prolite"|"pro_lite"=>"Pro","plus"=>"Plus","free"=>"Free","team"|"business"=>"Business","enterprise"=>"Enterprise",other=>other};let label=if plan.is_empty(){a.provider.name().to_owned()}else{format!("{} · {}",a.provider.name(),plan)};
         c.text(157.0,64.0,&c.fit(&label,12.0,W::Semibold,145.0),12.0,W::Semibold,theme::WHITE,H::Left);
         if let Some(s)=snapshot{
@@ -213,6 +237,19 @@ impl App {
                 ui.allocate_ui_with_layout(egui::vec2(ui.available_width(),30.0),egui::Layout::left_to_right(egui::Align::Center),|ui|{ui.label(egui::RichText::new(a.provider.name()).strong());ui.add_sized([150.0,25.0],egui::TextEdit::singleline(&mut a.alias).vertical_align(egui::Align::Center).hint_text("账号备注"));if a.provider==Provider::GrokBot && ui.add_enabled(self.quota.login.is_none(),egui::Button::new("重新连接").small()).clicked(){reconnect=Some(a.alias.clone());}if a.provider==Provider::Gemini && ui.add_enabled(self.quota.gemini_connecting.is_none(),egui::Button::new("重新连接").small()).clicked(){gemini_reconnect=Some((a.alias.clone(),a.slot.clone()));}if ui.add_enabled(a.provider!=Provider::Gemini || self.quota.gemini_connecting.is_none(),egui::Button::new("移除").small()).clicked(){remove=Some(a.id.clone());}});
                 ui.horizontal(|ui|{ui.checkbox(&mut a.enabled,"监控");ui.checkbox(&mut a.pinned,"常驻刘海");if ui.selectable_label(self.quota.config.selected==a.id,"当前账号").clicked(){self.quota.config.selected=a.id.clone();}});
                 let mut color=self.quota.config.colors.get(&a.id).copied().unwrap_or_default();color_picker(ui,a.provider,&mut color);if color==Accent::Brand{self.quota.config.colors.remove(&a.id);}else{self.quota.config.colors.insert(a.id.clone(),color);}
+                // 绝对值来源要有分母才能画进度：上限用来定义 100%，超出时圆环内圈多绕一圈。
+                if matches!(a.provider,Provider::Harness|Provider::WorkBuddy){
+                    let default_cap=a.provider.default_cap();
+                    let mut cap=self.quota.config.caps.get(&a.id).copied().or(default_cap).unwrap_or(0.0);
+                    ui.horizontal(|ui|{
+                        ui.label(egui::RichText::new("上限").size(12.0));
+                        let changed=ui.add(egui::DragValue::new(&mut cap).speed(1.0).range(0.0..=1_000_000.0)).changed();
+                        ui.label(egui::RichText::new(a.provider.cap_unit()).size(11.0));
+                        if changed{if cap>0.0{self.quota.config.caps.insert(a.id.clone(),cap);}else{self.quota.config.caps.remove(&a.id);}}
+                        let hint=match a.provider{Provider::WorkBuddy=>"默认取购买总量，调小就能看到溢出内圈",_=>"默认每日 10 元，超出后内圈多绕一圈"};
+                        ui.label(egui::RichText::new(hint).size(11.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_gray(170),Color32::from_gray(85))));
+                    });
+                }
                 let source=if a.provider==Provider::Gemini{"Gemini 网页订阅 · Windows 加密保存".into()}else if a.provider==Provider::GrokBot{if a.source.as_os_str().is_empty(){"浏览器登录 · Windows 安全存储".into()}else{"Grok Bot 本机登录".into()}}else{a.source.to_string_lossy()};
                 ui.label(egui::RichText::new(source).size(11.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_gray(170),Color32::from_gray(85))));
                 let message=if self.quota.busy.contains(&a.id){"正在更新…".into()}else{match self.quota.rows.get(&a.id){Some(Ok(s))=>format!("已更新 · {} 个额度周期",s.windows.len()),Some(Err(e))=>e.clone(),None=>"等待更新".into()}};ui.label(egui::RichText::new(message).size(11.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_gray(170),Color32::from_gray(85))));ui.add_space(6.0);
@@ -220,7 +257,7 @@ impl App {
             ui.horizontal(|ui|{if ui.button("识别本机账号").clicked(){self.quota.note=self.quota.config.discover().message();}if ui.add_enabled(self.quota.busy.is_empty(),egui::Button::new("刷新额度")).clicked(){self.pending.push(Cmd::QuotaRefresh);}});
             ui.label(egui::RichText::new("本机识别支持 Codex、Claude 桌面版与 Code、Kimi Code、Grok Bot、WorkBuddy、DeepSeek Harness；Gemini 请连接浏览器。").size(12.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_gray(180),Color32::from_gray(75))));
         });
-        if let Some(id)=remove{if let Some(account)=self.quota.config.accounts.iter().find(|a|a.id==id){match account.provider{Provider::GrokBot=>{quota::grok::forget(account);self.quota.login=None;},Provider::Gemini=>quota::gemini::forget(account),_=>{}}}self.quota.config.accounts.retain(|a|a.id!=id);self.quota.config.colors.remove(&id);self.quota.rows.remove(&id);self.quota.busy.remove(&id);if self.quota.config.selected==id{self.quota.config.selected=self.quota.config.accounts.first().map(|a|a.id.clone()).unwrap_or_default();}}
+        if let Some(id)=remove{if let Some(account)=self.quota.config.accounts.iter().find(|a|a.id==id){match account.provider{Provider::GrokBot=>{quota::grok::forget(account);self.quota.login=None;},Provider::Gemini=>quota::gemini::forget(account),_=>{}}}self.quota.config.accounts.retain(|a|a.id!=id);self.quota.config.colors.remove(&id);self.quota.config.caps.remove(&id);self.quota.rows.remove(&id);self.quota.busy.remove(&id);if self.quota.config.selected==id{self.quota.config.selected=self.quota.config.accounts.first().map(|a|a.id.clone()).unwrap_or_default();}}
         if let Some(alias)=reconnect{self.quota_login(alias);}
         if let Some((alias,slot))=gemini_reconnect{self.quota.gemini_connecting=Some(quota::gemini::Connect::start(alias,String::new(),None,slot));}
         settings_label(ui,"添加其他账号");settings_card(ui,|ui|{
@@ -281,10 +318,12 @@ impl App {
             (Provider::Codex,"个人",None),
             (Provider::Codex,"工作",None),
             (Provider::Claude,"Claude",None),
-            (Provider::Harness,"DSH",Some(Reading{value:22.88,unit:"元",caption:"今日已用 3.98 元".into()})),
-            (Provider::WorkBuddy,"WorkBuddy",Some(Reading{value:478.0,unit:"分",caption:"7 个积分包 · 最近到期 12 月 1 日".into()})),
+            (Provider::Harness,"DSH",Some(Reading{value:22.88,unit:"元",caption:"今日已用 3.98 元".into(),used:Some(3.98),cap:None})),
+            (Provider::WorkBuddy,"WorkBuddy",Some(Reading{value:478.0,unit:"分",caption:"7 个积分包 · 最近到期 12 月 1 日".into(),used:Some(2100.0),cap:Some(2578.0)})),
         ];
         for(i,(provider,alias,reading))in demo_accounts.into_iter().enumerate(){let id=format!("demo-{i}");self.quota.config.accounts.push(Account{id:id.clone(),provider,alias:alias.into(),source:format!("demo-{i}.json").into(),slot:None,enabled:true,pinned:mode=="multi"||i==0});let snapshot=if let Some(reading)=reading{Ok(Snapshot{plan:alias.into(),windows:vec![],extra:vec![],reading:Some(reading),at:chrono::Utc::now().timestamp()})}else{let payload=if provider==Provider::Codex{json!({"plan_type":if i==0{"pro"}else{"plus"},"rate_limit":{"primary_window":if mode=="single" && i==0{serde_json::Value::Null}else{json!({"used_percent":28+i*15,"limit_window_seconds":18000,"reset_at":reset})},"secondary_window":{"used_percent":56,"limit_window_seconds":604800,"reset_at":reset+200000}}})}else{json!({"five_hour":{"utilization":45,"resets_at":"2030-01-01T12:00:00Z"},"seven_day":{"utilization":27}})};quota::parse(provider,&payload)};self.quota.rows.insert(id,snapshot);}
+        // 演示里给 WorkBuddy 设一个偏低的上限（2000），让录制能同时展示「已用 105%」的内圈溢出。
+        self.quota.config.caps.insert("demo-4".into(),2000.0);
         self.quota.config.selected="demo-0".into();self.show_page(6);if self.settings_open{self.settings_tab=11;}
     }
 }

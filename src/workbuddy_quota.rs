@@ -116,12 +116,13 @@ pub fn parse(v: &Value) -> Result<Snapshot, String> {
             None => format!("{counted} 个积分包"),
         }
     };
-    let _ = size; // 总量本版不参与绘制（无分母），保留计算以备后续，避免编造假进度。
+    // 总量是天然分母：已用 = 买过的总量 − 当前剩余，超过用户设的上限时圆环会长出内圈。
+    let used = (size - remain).max(0.0);
     Ok(Snapshot {
         plan: "WorkBuddy".into(),
         windows: vec![],
         extra: vec![],
-        reading: Some(Reading { value: remain, unit: "分", caption }),
+        reading: Some(Reading { value: remain, unit: "分", caption, used: Some(used), cap: (size > 0.0).then_some(size) }),
         at: chrono::Utc::now().timestamp(),
     })
 }

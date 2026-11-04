@@ -28,6 +28,11 @@ pub enum Provider { #[default] Codex, Claude, Kimi, GrokBot, Gemini, Harness, Wo
 impl Provider {
     pub const ALL: [Self; 7] = [Self::Codex, Self::Claude, Self::Kimi, Self::GrokBot, Self::Gemini, Self::Harness, Self::WorkBuddy];
     pub fn name(self) -> &'static str { match self {Self::Codex=>"Codex",Self::Claude=>"Claude",Self::Kimi=>"Kimi",Self::GrokBot=>"Grok Bot",Self::Gemini=>"Gemini",Self::Harness=>"DeepSeek Harness",Self::WorkBuddy=>"WorkBuddy"} }
+    /// 没有天然分母时用的默认上限（用户可在设置里改）。
+    /// DSH 的用量按天算，所以默认是「每日预算 10 元」；WorkBuddy 有购买总量，不用默认值。
+    pub fn default_cap(self) -> Option<f64> { match self {Self::Harness=>Some(10.0),_=>None} }
+    /// 上限输入框的单位。
+    pub fn cap_unit(self) -> &'static str { if self==Self::WorkBuddy {"分"} else {"元"} }
     fn parse(s: &str) -> Option<Self> {
         // 名称与枚举名不一致的来源先特判，再按 ALL 的正式名称兜底匹配。
         if s.eq_ignore_ascii_case("grokbot"){return Some(Self::GrokBot);}
@@ -46,9 +51,9 @@ impl Accent {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Account {pub id:String, pub provider:Provider, pub alias:String, pub source:PathBuf, pub slot:Option<String>, pub enabled:bool, pub pinned:bool}
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Config {pub enabled:bool, pub compact:bool, pub selected:String, pub accounts:Vec<Account>, pub colors:HashMap<String,Accent>}
-impl Default for Config {fn default()->Self {Self{enabled:true,compact:true,selected:String::new(),accounts:vec![],colors:HashMap::new()}}}
+#[derive(Clone, Debug, PartialEq)]
+pub struct Config {pub enabled:bool, pub compact:bool, pub selected:String, pub accounts:Vec<Account>, pub colors:HashMap<String,Accent>, pub caps:HashMap<String,f64>}
+impl Default for Config {fn default()->Self {Self{enabled:true,compact:true,selected:String::new(),accounts:vec![],colors:HashMap::new(),caps:HashMap::new()}}}
 impl Config {
     pub fn load()->Self {
         let path=crate::model::config_dir().join("ai-quota.json");
@@ -60,9 +65,10 @@ impl Config {
             id:a["id"].as_str()?.into(),provider:Provider::parse(a["provider"].as_str()?)?,alias:a["alias"].as_str()?.into(),source:PathBuf::from(a["source"].as_str()?),slot:a["slot"].as_str().map(str::to_owned),enabled:a["enabled"].as_bool().unwrap_or(true),pinned:a["pinned"].as_bool().unwrap_or(false)
         })).collect();
         let colors=v["colors"].as_object().into_iter().flatten().filter_map(|(id,value)|{let color=Accent::parse(value.as_str()?);(color!=Accent::Brand).then(||(id.clone(),color))}).collect();
-        Self{enabled:v["enabled"].as_bool().unwrap_or(true),compact:v["compact"].as_bool().unwrap_or(true),selected:v["selected"].as_str().unwrap_or_default().into(),accounts,colors}
+        let caps=v["caps"].as_object().into_iter().flatten().filter_map(|(id,value)|{let cap=value.as_f64().filter(|n|n.is_finite()&&*n>0.0)?;Some((id.clone(),cap))}).collect();
+        Self{enabled:v["enabled"].as_bool().unwrap_or(true),compact:v["compact"].as_bool().unwrap_or(true),selected:v["selected"].as_str().unwrap_or_default().into(),accounts,colors,caps}
     }
-    fn json(&self)->Value {let colors:serde_json::Map<String,Value>=self.colors.iter().map(|(id,color)|(id.clone(),json!(color.key()))).collect();json!({"enabled":self.enabled,"compact":self.compact,"selected":self.selected,"colors":colors,"accounts":self.accounts.iter().map(|a|json!({"id":a.id,"provider":a.provider.name(),"alias":a.alias,"source":a.source,"slot":a.slot,"enabled":a.enabled,"pinned":a.pinned})).collect::<Vec<_>>()})}
+    fn json(&self)->Value {let colors:serde_json::Map<String,Value>=self.colors.iter().map(|(id,color)|(id.clone(),json!(color.key()))).collect();let caps:serde_json::Map<String,Value>=self.caps.iter().map(|(id,cap)|(id.clone(),json!(cap))).collect();json!({"enabled":self.enabled,"compact":self.compact,"selected":self.selected,"colors":colors,"caps":caps,"accounts":self.accounts.iter().map(|a|json!({"id":a.id,"provider":a.provider.name(),"alias":a.alias,"source":a.source,"slot":a.slot,"enabled":a.enabled,"pinned":a.pinned})).collect::<Vec<_>>()})}
     pub fn save(&self) {
         let dir=crate::model::config_dir();let _=fs::create_dir_all(&dir);
         if let Ok(raw)=serde_json::to_vec_pretty(&self.json()){let _=crate::model::atomic_write(&dir.join("ai-quota.json"),&raw);}
@@ -185,7 +191,7 @@ impl Config {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct Window {pub label:String,pub seconds:Option<i64>,pub remaining:f32,pub reset:Option<i64>}
-/// 非百分比来源（余额、积分）的读数。有它时圆环不画比例，只画底环 + 中心数值。
+/// 非百分比来源（余额、积分）的读数。有进度口径时圆环画「已用 / 上限」，没有就只画底环 + 中心数值。
 #[derive(Clone, Debug, PartialEq)]
 pub struct Reading {
     pub value: f64,
@@ -193,6 +199,10 @@ pub struct Reading {
     pub unit: &'static str,
     /// 数值下面那行说明，例如「今日已用 3.98 元」。
     pub caption: String,
+    /// 已用量（与 value 同单位）。None = 这个来源没有可靠的「用了多少」口径。
+    pub used: Option<f64>,
+    /// 天然上限（例如 WorkBuddy 的购买总量）。None = 只能用用户自己设的上限。
+    pub cap: Option<f64>,
 }
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {pub plan:String,pub windows:Vec<Window>,pub extra:Vec<Window>,pub reading:Option<Reading>,pub at:i64}

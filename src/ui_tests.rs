@@ -4262,11 +4262,13 @@ fn quota_reading_preview_renders_png() {
     let Some(dir)=std::env::var_os("DAOZAI_QUOTA_PREVIEW_DIR").map(std::path::PathBuf::from) else {return;};
     std::fs::create_dir_all(&dir).unwrap();
     let h=H::new();
-    let width=400u32;let height=180u32;
-    // 一个余额（元，两位小数）、一个积分（分，整数），验证两种绝对值读数。
-    let cases:[(&str,Provider,Reading);2]=[
-        ("harness",Provider::Harness,Reading{value:22.88,unit:"元",caption:"今日已用 3.98 元".into()}),
-        ("workbuddy",Provider::WorkBuddy,Reading{value:478.0,unit:"分",caption:"7 个积分包 · 最近到期 12月1日".into()}),
+    // 按真实展开态画布（512x186）出图，否则右边文案会被裁掉，看不出实际排版。
+    let width=512u32;let height=186u32;
+    // 三种绝对值读数：余额（未超上限）、积分（有天然总量）、余额（已超每日预算 → 内圈溢出）。
+    let cases:[(&str,Provider,Reading);3]=[
+        ("harness",Provider::Harness,Reading{value:22.88,unit:"元",caption:"今日已用 3.98 元".into(),used:Some(3.98),cap:None}),
+        ("workbuddy",Provider::WorkBuddy,Reading{value:478.0,unit:"分",caption:"7 个积分包 · 最近到期 12月1日".into(),used:Some(2100.0),cap:Some(2578.0)}),
+        ("overflow",Provider::Harness,Reading{value:22.88,unit:"元",caption:"今日已用 12.40 元".into(),used:Some(12.4),cap:None}),
     ];
     let mut app=h.app;
     for (id,provider,reading) in &cases{
