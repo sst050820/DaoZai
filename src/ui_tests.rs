@@ -4264,8 +4264,8 @@ fn quota_reading_preview_renders_png() {
     let h=H::new();
     // 按真实额度页画布（PW x QUOTA_H）出图，否则看不出环有没有被卡片裁掉。
     let width=crate::app::PW as u32;let height=crate::app::QUOTA_H as u32;
-    // 三种绝对值读数：余额 22.88 / 总额 50（外圈约 46%）、积分（有天然总量）、
-    // 余额超过总额（额度被追加过 → 环满后走内圈溢出）。
+    // 三种绝对值读数：余额 22.88 / 总额 50（外圈约 46%）、积分 478 / 总量 2578（约 18.5%）、
+    // 余额 60 超过总额 50（充值后总额设小了 → 环满后走内圈溢出）。
     let cases:[(&str,Provider,Reading);3]=[
         ("harness",Provider::Harness,Reading{value:22.88,unit:"元",caption:"账户余额 22.88 元".into(),used:None,cap:None}),
         ("workbuddy",Provider::WorkBuddy,Reading{value:478.0,unit:"分",caption:"7 个积分包 · 最近到期 12月1日".into(),used:Some(2100.0),cap:Some(2578.0)}),

@@ -620,8 +620,8 @@ fn gallery() {
             if scene==16 {app.settings.minimal=true;}
             if scene==17 && frame==0 {app.receive_notification("聊天应用".into(),"whatsapp.preview".into(),"你好，下午见".into());}
             // 额度页要单独出图：它的面板比别页高（QUOTA_H），要确认大环不被卡片裁掉。
-            // 18 是未超上限的余额环，19 是 105% 的内圈溢出，20 是 150% 的一半叠压。
-            if scene>=18 {if frame==0 {app.quota_demo("single");match scene{18=>app.quota_demo_focus("demo-3",None),19=>app.quota_demo_focus("demo-4",Some(2000.0)),_=>app.quota_demo_focus("demo-4",Some(1400.0)),}} app.show_page(6);}
+            // 18 是余额环（22.88 / 总额 50），19 是总额调小后的内圈溢出，20 是溢出叠满半圈。
+            if scene>=18 {if frame==0 {app.quota_demo("single");match scene{18=>app.quota_demo_focus("demo-3",None),19=>app.quota_demo_focus("demo-4",Some(400.0)),_=>app.quota_demo_focus("demo-4",Some(300.0)),}} app.show_page(6);}
             let idle=if scene==7{60.0}else if scene==8{200.0}else{0.0};
             let env=Env{t,clock:"10:28:00".into(),today:"2026-10-28".into(),date:"10月28日 周三".into(),battery:Some(76),charging:true,cursor:if scene<6{Some(Pos2::new(320.0,60.0))}else{None},idle_seconds:Some(idle),..Default::default()};
             let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(640.0,190.0))),time:Some(t),viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(2.0),..Default::default()})).collect(),..Default::default()};

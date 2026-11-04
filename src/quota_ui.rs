@@ -80,23 +80,18 @@ fn default_cap(a:&Account,snapshot:Option<&Snapshot>)->Option<f64>{
 }
 fn ring(c:&Card,a:&Account,snapshot:Option<&Snapshot>,x:f32,y:f32,size:f32,colors:[Color32;2],cap:Option<f64>){
     let windows=snapshot.map(Snapshot::rings).unwrap_or_default();let dual=windows.len()>1;
-    // 余额/积分：一律画成「分子 / 分母」的进度环，超过 100% 时溢出那截不延长外圈，
+    // 余额/积分：一律画成「环上的数 / 总额」的进度环，超过 100% 时溢出那截不延长外圈，
     // 而是绕进内圈，两圈叠在一起——外圈永远停在满格，「刚好满」和「已经超了」一眼能分开。
     //
-    // 口径按来源分开：
-    // - 余额类（DSH）：分子 = 余额，分母 = 总额（默认 50 元）。余额越多环越满。
-    //   不看「今日用量」——那个数每天清零，和「还剩多少」不是一回事；
-    // - 额度类（WorkBuddy 的积分包）：分子 = 服务端给的已用量，分母 = 购买总量。
+    // 分子永远是圆环中间显示的那个数（DSH 是余额，WorkBuddy 是剩余积分），分母是总额。
+    // 语义统一成「还剩多少」：环越满，余额越多。不掺「今日用量」——那个数每天清零，
+    // 和「还剩多少」不是一回事。
     if let Some(reading)=snapshot.and_then(|s|s.reading.as_ref()){
         let col=colors[0];
         let stroke=(size*0.078).clamp(2.0,4.6);
         let radius=size/2.0-2.0;
-        // 分子也分两种来源：余额类取「余额」，额度类取「已用」。
-        let numerator=match reading.used{
-            Some(used)=>used,
-            None if reading.value>=0.0=>reading.value,
-            None=>0.0,
-        };
+        // 分子就是环中间那个数（余额 / 剩余积分），分母是总额。
+        let numerator=reading.value.max(0.0);
         let ratio=cap.map(|cap|(numerator as f32/cap as f32).max(0.0));
         let start=-std::f32::consts::FRAC_PI_2;
         // 底环按「已画比例」补一段暗弧，剩下的留空——满格之后还有一段空着的暗弧，
@@ -362,8 +357,8 @@ impl App {
             (Provider::WorkBuddy,"WorkBuddy",Some(Reading{value:478.0,unit:"分",caption:"7 个积分包 · 最近到期 12 月 1 日".into(),used:Some(2100.0),cap:Some(2578.0)})),
         ];
         for(i,(provider,alias,reading))in demo_accounts.into_iter().enumerate(){let id=format!("demo-{i}");self.quota.config.accounts.push(Account{id:id.clone(),provider,alias:alias.into(),source:format!("demo-{i}.json").into(),slot:None,enabled:true,pinned:mode=="multi"||i==0});let snapshot=if let Some(reading)=reading{Ok(Snapshot{plan:alias.into(),windows:vec![],extra:vec![],reading:Some(reading),at:chrono::Utc::now().timestamp()})}else{let payload=if provider==Provider::Codex{json!({"plan_type":if i==0{"pro"}else{"plus"},"rate_limit":{"primary_window":if mode=="single" && i==0{serde_json::Value::Null}else{json!({"used_percent":28+i*15,"limit_window_seconds":18000,"reset_at":reset})},"secondary_window":{"used_percent":56,"limit_window_seconds":604800,"reset_at":reset+200000}}})}else{json!({"five_hour":{"utilization":45,"resets_at":"2030-01-01T12:00:00Z"},"seven_day":{"utilization":27}})};quota::parse(provider,&payload)};self.quota.rows.insert(id,snapshot);}
-        // 演示里给 WorkBuddy 设一个偏低的上限（2000），让录制能同时展示「已用 105%」的内圈溢出。
-        self.quota.config.caps.insert("demo-4".into(),2000.0);
+        // 演示里给 WorkBuddy 设一个偏低的总额（400），剩余 478 就能展示「超过总额」的内圈溢出。
+        self.quota.config.caps.insert("demo-4".into(),400.0);
         self.quota.config.selected="demo-0".into();self.show_page(6);if self.settings_open{self.settings_tab=11;}
     }
     /// 录制专用：DSH 账号还在，但本轮还没同步到读数（刚启动、读缓存失败）。
