@@ -199,7 +199,7 @@ impl App {
         let colors=accent_colors(&self.quota.config,a);
         // 上限：用户设的优先，其次来源自带的总量，最后才用厂商默认值。
         let cap=self.quota.config.caps.get(&a.id).copied().or_else(||snapshot.and_then(|s|s.reading.as_ref()).and_then(|r|r.cap)).or_else(||a.provider.default_cap());
-        ring(c,a,snapshot,105.0,97.0,88.0,colors,cap);
+        ring(c,a,snapshot,105.0,100.0,88.0,colors,cap);
         let raw_plan=snapshot.map(|s|s.plan.as_str()).unwrap_or_default();let plan=match raw_plan{"pro"|"prolite"|"pro_lite"=>"Pro","plus"=>"Plus","free"=>"Free","team"|"business"=>"Business","enterprise"=>"Enterprise",other=>other};let label=if plan.is_empty(){a.provider.name().to_owned()}else{format!("{} · {}",a.provider.name(),plan)};
         c.text(157.0,64.0,&c.fit(&label,12.0,W::Semibold,145.0),12.0,W::Semibold,theme::WHITE,H::Left);
         if let Some(s)=snapshot{
@@ -307,6 +307,12 @@ impl App {
     fn quota_file_form(&mut self,ui:&mut egui::Ui){
         ui.label("登录 JSON 文件");ui.horizontal(|ui|{ui.add_sized([(ui.available_width()-65.0).max(100.0),27.0],egui::TextEdit::singleline(&mut self.quota.source).vertical_align(egui::Align::Center).hint_text("选择该账号的登录文件"));if ui.button("选择…").clicked(){self.pending.push(Cmd::QuotaChooseFile);}});
         if ui.button("添加账号").clicked(){match self.quota.config.add(self.quota.provider,self.quota.alias.clone(),self.quota.source.trim().into()){Ok(())=>{self.quota.alias.clear();self.quota.source.clear();self.quota.note="账号已添加".into();},Err(e)=>self.quota.note=e}}
+    }
+    /// 录制专用：切到某个演示账号，并可临时塞一个上限，用来演示「超出上限」的内圈。
+    #[cfg(feature="record")]
+    pub fn quota_demo_focus(&mut self,id:&str,cap:Option<f64>){
+        self.quota.config.selected=id.into();
+        if let Some(cap)=cap{self.quota.config.caps.insert(id.into(),cap);}
     }
     #[cfg(feature="record")]
     pub fn quota_demo(&mut self,mode:&str){

@@ -24,6 +24,9 @@ pub const PW: f32 = 419.0; // 展开面板宽
 pub const PH: f32 = 140.0; // 展开面板高
 pub(crate) const CALENDAR_PAGE: usize = 7;
 pub(crate) const CALENDAR_H: f32 = 216.0;
+/// AI 额度页要放下 88px 的大环 + 内圈溢出，默认 140 高度会切掉环底。
+pub(crate) const QUOTA_PAGE: usize = 6;
+pub(crate) const QUOTA_H: f32 = 172.0;
 pub const BAR_W: f32 = 163.0; // 收起药丸宽
 pub const BAR_H: f32 = 30.0; // 收起药丸高
 pub(crate) const HUD_W: f32 = 260.0;
@@ -1118,7 +1121,7 @@ impl App {
     }
 
     pub(crate) fn expanded_height(&self)->f32 {
-        if self.page==CALENDAR_PAGE {CALENDAR_H}else if self.page==5&&self.mail.open_uid.is_some(){236.0}else{PH}
+        if self.page==CALENDAR_PAGE {CALENDAR_H}else if self.page==QUOTA_PAGE {QUOTA_H}else if self.page==5&&self.mail.open_uid.is_some(){236.0}else{PH}
     }
 
     // ---------------------------------------------------------------

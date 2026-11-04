@@ -4262,8 +4262,8 @@ fn quota_reading_preview_renders_png() {
     let Some(dir)=std::env::var_os("DAOZAI_QUOTA_PREVIEW_DIR").map(std::path::PathBuf::from) else {return;};
     std::fs::create_dir_all(&dir).unwrap();
     let h=H::new();
-    // 按真实展开态画布（512x186）出图，否则右边文案会被裁掉，看不出实际排版。
-    let width=512u32;let height=186u32;
+    // 按真实额度页画布（PW x QUOTA_H）出图，否则看不出环有没有被卡片裁掉。
+    let width=crate::app::PW as u32;let height=crate::app::QUOTA_H as u32;
     // 三种绝对值读数：余额（未超上限）、积分（有天然总量）、余额（已超每日预算 → 内圈溢出）。
     let cases:[(&str,Provider,Reading);3]=[
         ("harness",Provider::Harness,Reading{value:22.88,unit:"元",caption:"今日已用 3.98 元".into(),used:Some(3.98),cap:None}),
