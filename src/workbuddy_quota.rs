@@ -148,7 +148,10 @@ fn read_json(response: ureq::Response) -> Result<Value, String> {
 /// HTTP 错误 →（文案，退避秒数）。退避口径照任务书与 quota.rs 现有写法。
 fn http_error(error: ureq::Error) -> (String, u64) {
     match error {
-        ureq::Error::Status(401 | 403, _) => (LOGIN_ERROR.into(), 0),
+        ureq::Error::Status(401, _) => (LOGIN_ERROR.into(), 0),
+        // 403 不等于登录失效：网关拦截异常客户端也返回 403。混在一起会把
+        // 「UA 被拦」误报成「请重新登录」，让人白重登一次。
+        ureq::Error::Status(403, _) => ("WorkBuddy 拒绝了这次请求（403），请稍后重试".into(), 60),
         ureq::Error::Status(429, r) => (
             "请求过于频繁，稍后自动重试".into(),
             r.header("Retry-After").and_then(|s| s.parse().ok()).unwrap_or(180).clamp(30, 3600),
@@ -192,6 +195,10 @@ pub fn fetch(agent: &ureq::Agent, account: &Account) -> Result<Snapshot, (String
         .set("Accept", "application/json")
         .set("X-User-Id", uid)
         .set("X-Domain", domain)
+        // 腾讯网关会拦截通用 HTTP 库的默认 UA（实测 ureq 的 `ureq/2.x` 直接 403、
+        // 响应体 code=10085「请求不合法」），必须显式声明客户端身份。
+        // 用自家名字而不是冒充 `WorkBuddy/x.y`：这份 token 是用户的，请求是我们发的。
+        .set("User-Agent", concat!("Daozai/", env!("CARGO_PKG_VERSION")))
         .send_string(&request_body.to_string())
         .map_err(http_error)?;
     let value = read_json(response).map_err(|e| (e, 60))?;
