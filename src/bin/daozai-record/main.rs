@@ -614,8 +614,14 @@ fn gallery() {
         if scene==22 {
             let lrc="[00:00.00]뭐 해?\n[00:06.00]오늘 하루 어땠어 너는\n[00:12.00]별일 없이 지나갔니\n[00:18.00]가을 바람이 부네\n[00:24.00]사랑은 늘 도망가\n[00:30.00]너도 나를 떠나가";
             app.set_lyrics("뭐 해?","아이유",214.0,lyrics::parse_lrc(lrc));
-            app.settings.island_lyrics=true;
             app.settings.lyrics_enabled=true;
+            // 模拟外部接口只给纯文本歌词（没有时间轴）的情况。
+            let unsynced=std::env::var("DAOZAI_UNSYNCED").is_ok();
+            app.settings.island_lyrics=!unsynced;
+            if unsynced {
+                let plain="Track Track Track\nback off back off back off\nTrack Track Track\nbalance balance balance\nline five here now\nline six here now\nline seven here now\nline eight here now\nline nine here now\nline ten here now\nline eleven here now\nline twelve here now";
+                app.set_lyrics("뭐 해?","아이유",214.0,lyrics::from_plain(plain));
+            }
         }
         let mut ras=raster::Raster::new(1280,380);
         let mut rgba=vec![];

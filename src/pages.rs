@@ -138,11 +138,23 @@ impl App {
     }
 
     fn draw_music_lyrics(&mut self,c:&Card) {
-        let col=c.clipped(243.0,28.0,136.0,74.0);
+        // 没有逐句时间轴时（例如外部歌词接口只给了文本），按播放进度比例往下滚，
+        // 而不是永远停在最上面几句；带时间轴的歌词仍按句子走。
+        let mut head=0;
+        if let Some(lyrics)=&self.ly.lyrics {
+            if !lyrics.synced && lyrics.lines.len()>6 {
+                let duration=self.media.duration.max(1.0);
+                let progress=(self.media.position/duration).clamp(0.0,1.0) as f32;
+                head=((lyrics.lines.len()-1) as f32*progress) as usize;
+            }
+        }
+        let mut col=c.clipped(243.0,28.0,136.0,74.0);
+        // 先裁掉右侧歌词栏，再整体上移；clip 不随位移走，仍然卡在卡片范围内。
+        if head>0 {col=col.shifted(0.0,-(head as f32)*29.0);}
         c.seg((233.0,32.0),(233.0,98.0),1.0,Color32::from_gray(35));
         if let Some(lyrics)=&self.ly.lyrics {
-            let current=if lyrics.synced {lyrics.index_at(self.lyric_position())}else{Some(0)};
-            let target=current.unwrap_or(0);
+            let current=lyrics.index_at(self.lyric_position());
+            let target=current.unwrap_or(head);
             let position=c.ui.ctx().animate_value_with_time(egui::Id::new(("music-lyrics-scroll",&self.ly.key)),target as f32,0.3);
             let first=(position.floor() as usize).saturating_sub(2);
             for (index,line) in lyrics.lines.iter().enumerate().skip(first).take(6) {
@@ -158,7 +170,7 @@ impl App {
                 let y=64.0+distance*29.0-galley.size().y/(2.0*c.s);
                 row.painter.galley(row.pos(246.0,y),galley,ink);
             }
-            if !lyrics.synced {col.text(246.0,39.0,"文本歌词",8.0,W::Regular,theme::GRAY,H::Left);}
+            if !lyrics.synced {col.shifted(0.0,0.0).text(246.0,39.0,"文本歌词",8.0,W::Regular,theme::GRAY,H::Left);}
         } else {
             let status=if self.ly.loading {"正在查找歌词…"}else if let Some(error)=&self.ly.error {error.label()}else{"暂无歌词"};
             let galley=col.painter.layout(status.into(),col.font(10.0,W::Regular),theme::GRAY,130.0*c.s);
