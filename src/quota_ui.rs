@@ -78,6 +78,14 @@ fn default_cap(a:&Account,snapshot:Option<&Snapshot>)->Option<f64>{
         provider=>provider.default_cap(),
     }
 }
+/// 所有来源共用同一套环尺寸（外径与线宽）。余额/积分环以前单独用了一套
+/// (size*0.078, radius=size/2-2)，比 Codex 的百分比环更细、还大一圈，
+/// 几个环并排放在常驻栏里粗细不齐。统一到这里之后，哪种来源画的环都重合。
+fn ring_metrics(size:f32,dual:bool)->(f32,f32){
+    let stroke=if dual{if size<35.0{2.2}else{6.5}}else{(size*0.102).clamp(3.0,6.5)};
+    let radius=size/2.0-stroke/2.0-1.0;
+    (radius,stroke)
+}
 fn ring(c:&Card,a:&Account,snapshot:Option<&Snapshot>,x:f32,y:f32,size:f32,colors:[Color32;2],cap:Option<f64>){
     let windows=snapshot.map(Snapshot::rings).unwrap_or_default();let dual=windows.len()>1;
     // 余额/积分：一律画成「环上的数 / 总额」的进度环，超过 100% 时溢出那截不延长外圈，
@@ -88,8 +96,9 @@ fn ring(c:&Card,a:&Account,snapshot:Option<&Snapshot>,x:f32,y:f32,size:f32,color
     // 和「还剩多少」不是一回事。
     if let Some(reading)=snapshot.and_then(|s|s.reading.as_ref()){
         let col=colors[0];
-        let stroke=(size*0.078).clamp(2.0,4.6);
-        let radius=size/2.0-2.0;
+        // 最外环的线宽与外径跟 Codex 的百分比环完全一致；内圈溢出环是按
+        // radius/stroke 推出来的，跟着一起对齐，叠压关系不变。
+        let (radius,stroke)=ring_metrics(size,false);
         // 分子就是环中间那个数（余额 / 剩余积分），分母是总额。
         let numerator=reading.value.max(0.0);
         let ratio=cap.map(|cap|(numerator as f32/cap as f32).max(0.0));
@@ -137,8 +146,7 @@ fn ring(c:&Card,a:&Account,snapshot:Option<&Snapshot>,x:f32,y:f32,size:f32,color
         }
         return;
     }
-    let stroke=if dual{if size<35.0{2.2}else{6.5}}else{(size*0.102).clamp(3.0,6.5)};
-    let radius=size/2.0-stroke/2.0-1.0;
+    let (radius,stroke)=ring_metrics(size,dual);
     let gap=if size<35.0{1.5}else{3.0};
     let start=-std::f32::consts::FRAC_PI_2;
     for i in 0..if dual{2}else{1}{
