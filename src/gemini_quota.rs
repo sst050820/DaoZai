@@ -21,7 +21,7 @@ pub fn parse(value:&Value)->Result<Snapshot,String>{
         Some(Window{label:label.into(),seconds:Some(seconds),remaining:(100.0-used*100.0).clamp(0.0,100.0) as f32,reset:super::reset(&pool["gxu"]["windowRefreshesAt"])})
     }).collect::<Vec<_>>();
     if windows.is_empty(){return Err("此 Google 账号暂未提供 Gemini 订阅额度".into());}
-    Ok(Snapshot{plan:if usage["subscriptionTier"]=="TIER1"{"AI Pro"}else{""}.into(),windows,extra:vec![],at:chrono::Utc::now().timestamp()})
+    Ok(Snapshot{plan:if usage["subscriptionTier"]=="TIER1"{"AI Pro"}else{""}.into(),windows,extra:vec![],reading:None,at:chrono::Utc::now().timestamp()})
 }
 fn decode(raw:&str)->Result<Snapshot,String>{
     let raw=raw.trim_start();let raw=raw.strip_prefix(")]}'").unwrap_or(raw).trim_start();

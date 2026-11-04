@@ -6,6 +6,10 @@ use base64::Engine;
 pub(crate) mod grok;
 #[path="gemini_quota.rs"]
 pub(crate) mod gemini;
+#[path="workbuddy_quota.rs"]
+pub(crate) mod workbuddy;
+#[path="harness_quota.rs"]
+pub(crate) mod harness;
 #[path="claude_quota.rs"]
 mod claude;
 #[path="native_auth.rs"]
@@ -20,18 +24,24 @@ impl Discovery {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Provider { #[default] Codex, Claude, Kimi, GrokBot, Gemini }
+pub enum Provider { #[default] Codex, Claude, Kimi, GrokBot, Gemini, Harness, WorkBuddy }
 impl Provider {
-    pub const ALL: [Self; 5] = [Self::Codex, Self::Claude, Self::Kimi, Self::GrokBot, Self::Gemini];
-    pub fn name(self) -> &'static str { match self {Self::Codex=>"Codex",Self::Claude=>"Claude",Self::Kimi=>"Kimi",Self::GrokBot=>"Grok Bot",Self::Gemini=>"Gemini"} }
-    fn parse(s: &str) -> Option<Self> {if s.eq_ignore_ascii_case("grokbot"){return Some(Self::GrokBot);}Self::ALL.into_iter().find(|p|p.name().eq_ignore_ascii_case(s))}
+    pub const ALL: [Self; 7] = [Self::Codex, Self::Claude, Self::Kimi, Self::GrokBot, Self::Gemini, Self::Harness, Self::WorkBuddy];
+    pub fn name(self) -> &'static str { match self {Self::Codex=>"Codex",Self::Claude=>"Claude",Self::Kimi=>"Kimi",Self::GrokBot=>"Grok Bot",Self::Gemini=>"Gemini",Self::Harness=>"DeepSeek Harness",Self::WorkBuddy=>"WorkBuddy"} }
+    fn parse(s: &str) -> Option<Self> {
+        // 名称与枚举名不一致的来源先特判，再按 ALL 的正式名称兜底匹配。
+        if s.eq_ignore_ascii_case("grokbot"){return Some(Self::GrokBot);}
+        if s.eq_ignore_ascii_case("harness")||s.eq_ignore_ascii_case("dsh"){return Some(Self::Harness);}
+        if s.eq_ignore_ascii_case("workbuddy")||s.eq_ignore_ascii_case("codebuddy"){return Some(Self::WorkBuddy);}
+        Self::ALL.into_iter().find(|p|p.name().eq_ignore_ascii_case(s))
+    }
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Accent { #[default] Brand, Violet, Orange, Blue, Cyan, Pink, Gold, Green }
+pub enum Accent { #[default] Brand, Violet, Orange, Blue, Cyan, Pink, Gold, Green, Deep }
 impl Accent {
-    pub const ALL:[Self;8]=[Self::Brand,Self::Violet,Self::Orange,Self::Blue,Self::Cyan,Self::Pink,Self::Gold,Self::Green];
-    pub fn key(self)->&'static str{match self{Self::Brand=>"brand",Self::Violet=>"violet",Self::Orange=>"orange",Self::Blue=>"blue",Self::Cyan=>"cyan",Self::Pink=>"pink",Self::Gold=>"gold",Self::Green=>"green"}}
-    pub fn label(self)->&'static str{match self{Self::Brand=>"跟随厂商",Self::Violet=>"蓝紫",Self::Orange=>"暖橙",Self::Blue=>"湛蓝",Self::Cyan=>"青蓝",Self::Pink=>"玫红",Self::Gold=>"金黄",Self::Green=>"翠绿"}}
+    pub const ALL:[Self;9]=[Self::Brand,Self::Violet,Self::Orange,Self::Blue,Self::Cyan,Self::Pink,Self::Gold,Self::Green,Self::Deep];
+    pub fn key(self)->&'static str{match self{Self::Brand=>"brand",Self::Violet=>"violet",Self::Orange=>"orange",Self::Blue=>"blue",Self::Cyan=>"cyan",Self::Pink=>"pink",Self::Gold=>"gold",Self::Green=>"green",Self::Deep=>"deep"}}
+    pub fn label(self)->&'static str{match self{Self::Brand=>"跟随厂商",Self::Violet=>"蓝紫",Self::Orange=>"暖橙",Self::Blue=>"湛蓝",Self::Cyan=>"青蓝",Self::Pink=>"玫红",Self::Gold=>"金黄",Self::Green=>"翠绿",Self::Deep=>"鲸蓝"}}
     fn parse(key:&str)->Self{Self::ALL.into_iter().find(|c|c.key()==key).unwrap_or_default()}
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,6 +68,21 @@ impl Config {
         if let Ok(raw)=serde_json::to_vec_pretty(&self.json()){let _=crate::model::atomic_write(&dir.join("ai-quota.json"),&raw);}
     }
     pub fn add(&mut self,provider:Provider,alias:String,source:PathBuf)->Result<(),String>{
+        if provider==Provider::WorkBuddy{return self.import_workbuddy(&source,&alias).map(|_|());}
+        if provider==Provider::Harness{
+            // source 是 .dshw-usage.json 的路径；先解析一次确认能读，再入库。
+            if !source.is_file(){return Err("请选择已有的 DSH 用量记录文件".into());}
+            let raw=fs::read(&source).map_err(|_|"读不到 DSH 的用量记录".to_string())?;
+            let candidate:Value=serde_json::from_slice(&raw).map_err(|_|"DSH 用量记录格式无法识别".to_string())?;
+            let mtime=fs::metadata(&source).and_then(|m|m.modified()).ok();
+            harness::parse(&candidate,mtime)?; // 校验 lastBalance 有效，失败直接把错误返回。
+            let path=fs::canonicalize(&source).unwrap_or(source);
+            if self.accounts.iter().any(|a|a.provider==Provider::Harness && a.source.to_string_lossy().eq_ignore_ascii_case(&path.to_string_lossy())){return Err("这个用量记录已经添加".into());}
+            let id=format!("Harness-{}",std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos());
+            let pinned=self.accounts.is_empty();if pinned{self.selected=id.clone();}
+            let label=if alias.trim().is_empty(){"DeepSeek Harness".to_string()}else{alias.trim().to_owned()};
+            self.accounts.push(Account{id,provider,alias:label,source:path,slot:None,enabled:true,pinned});return Ok(());
+        }
         if provider==Provider::Gemini{return Err("请使用浏览器或 Cookie 连接 Gemini 网页账号".into());}
         if provider==Provider::GrokBot{return self.import_grok(&source,&alias).map(|_|());}
         if provider==Provider::Claude&&claude::is_desktop(&source){return self.import_claude(&source,&alias).map(|_|());}
@@ -97,6 +122,17 @@ impl Config {
         }
         Ok(added)
     }
+    pub(crate) fn import_workbuddy(&mut self,path:&Path,alias:&str)->Result<usize,String>{
+        // 与 import_grok 同构：一个登录文件可能含多个账号，按 uid 去重。
+        let profiles=workbuddy::profiles(path)?;let path=fs::canonicalize(path).unwrap_or_else(|_|path.to_owned());let mut added=0;
+        for profile in profiles{
+            if self.accounts.iter().any(|a|a.provider==Provider::WorkBuddy && a.slot.as_deref()==Some(&profile.slot)){continue;}
+            let id=format!("WorkBuddy-{}",profile.slot);let pinned=self.pinned_indices().len()<3;if self.accounts.is_empty(){self.selected=id.clone();}
+            let label=if alias.trim().is_empty(){profile.label}else{format!("{alias} · {}",added+1)};
+            self.accounts.push(Account{id,provider:Provider::WorkBuddy,alias:label,source:path.clone(),slot:Some(profile.slot),enabled:true,pinned});added+=1;
+        }
+        Ok(added)
+    }
     fn import_claude(&mut self,path:&Path,alias:&str)->Result<usize,String>{
         let profiles=claude::profiles(path)?;let path=fs::canonicalize(path).unwrap_or_else(|_|path.to_owned());let mut added=0;
         for profile in profiles{
@@ -124,6 +160,11 @@ impl Config {
             }
         }
         if let Some(path)=grok::native_path(){if let Err(error)=self.import_grok(&path,""){notes.push(error);}}
+        // 这两个服务大部分人没装，找不到/读不出都安静跳过，报「没找到」只会变成噪音。
+        if let Some(path)=harness::native_path(){
+            if !self.accounts.iter().any(|a|a.provider==Provider::Harness){let _=self.add(Provider::Harness,String::new(),path);}
+        }
+        if let Some(path)=workbuddy::native_path(){let _=self.import_workbuddy(&path,"");}
         notes.sort();notes.dedup();Discovery{added:self.accounts.len()-before,notes}
     }
     fn discover_files(&mut self,candidates:&[(Provider,PathBuf)])->Vec<String>{
@@ -144,8 +185,17 @@ impl Config {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct Window {pub label:String,pub seconds:Option<i64>,pub remaining:f32,pub reset:Option<i64>}
+/// 非百分比来源（余额、积分）的读数。有它时圆环不画比例，只画底环 + 中心数值。
+#[derive(Clone, Debug, PartialEq)]
+pub struct Reading {
+    pub value: f64,
+    /// 单位，显示在数字下面："元" / "分"。
+    pub unit: &'static str,
+    /// 数值下面那行说明，例如「今日已用 3.98 元」。
+    pub caption: String,
+}
 #[derive(Clone, Debug, Default)]
-pub struct Snapshot {pub plan:String,pub windows:Vec<Window>,pub extra:Vec<Window>,pub at:i64}
+pub struct Snapshot {pub plan:String,pub windows:Vec<Window>,pub extra:Vec<Window>,pub reading:Option<Reading>,pub at:i64}
 impl Snapshot {
     pub fn rings(&self)->Vec<&Window>{let mut all:Vec<_>=self.windows.iter().collect();all.sort_by_key(|w|w.seconds.unwrap_or(i64::MAX));all.truncate(2);all}
 }
@@ -159,6 +209,8 @@ fn codex_window(v:&Value)->Option<Window>{
 pub fn parse(provider:Provider,v:&Value)->Result<Snapshot,String>{
     if provider==Provider::GrokBot{return grok::parse(v);}
     if provider==Provider::Gemini{return gemini::parse(v);}
+    if provider==Provider::WorkBuddy{return workbuddy::parse(v);}
+    if provider==Provider::Harness{return harness::parse(v,None);}
     let mut s=Snapshot{plan:v["plan_type"].as_str().unwrap_or_default().into(),at:chrono::Utc::now().timestamp(),..Default::default()};
     match provider {
         Provider::Codex=>{
@@ -176,7 +228,7 @@ pub fn parse(provider:Provider,v:&Value)->Result<Snapshot,String>{
             if let Some(w)=section(&v["usage"],Some(604800)){s.windows.push(w);}
             for limit in v["limits"].as_array().into_iter().flatten(){let duration=limit["window"]["duration"].as_i64();let unit=limit["window"]["timeUnit"].as_str().unwrap_or_default();let factor=match unit{"TIME_UNIT_MINUTE"=>Some(60),"TIME_UNIT_HOUR"=>Some(3600),"TIME_UNIT_DAY"=>Some(86400),"TIME_UNIT_SECOND"=>Some(1),_=>None};let seconds=duration.zip(factor).and_then(|(d,f)|d.checked_mul(f));if let Some(w)=section(&limit["detail"],seconds){if !s.windows.iter().any(|old|old.seconds==w.seconds){s.windows.push(w);}}}
         }
-        Provider::GrokBot|Provider::Gemini=>unreachable!(),
+        Provider::GrokBot|Provider::Gemini|Provider::Harness|Provider::WorkBuddy=>unreachable!(),
     }
     if s.windows.is_empty(){return Err("服务未提供周期额度，暂不绘制进度".into());}
     s.windows.sort_by_key(|w|w.seconds.unwrap_or(i64::MAX));Ok(s)
@@ -194,7 +246,7 @@ fn account_credentials(account:&Account)->Result<Credential,String>{
 fn credentials(provider:Provider,path:&Path)->Result<Credential,String>{
     let root=login_json(path)?;
     let v=if provider==Provider::Codex{root.get("auth_json").unwrap_or(&root)}else{&root};
-    let token=match provider{Provider::Codex=>v.pointer("/tokens/access_token").or_else(||v.get("access_token")),Provider::Claude=>v.pointer("/claudeAiOauth/accessToken"),Provider::Kimi=>v.get("access_token"),Provider::GrokBot|Provider::Gemini=>None}.and_then(Value::as_str).filter(|s|!s.trim().is_empty()).ok_or("未找到订阅账号的登录凭据，请选择对应工具的登录文件")?.to_owned();
+    let token=match provider{Provider::Codex=>v.pointer("/tokens/access_token").or_else(||v.get("access_token")),Provider::Claude=>v.pointer("/claudeAiOauth/accessToken"),Provider::Kimi=>v.get("access_token"),Provider::GrokBot|Provider::Gemini|Provider::Harness|Provider::WorkBuddy=>None}.and_then(Value::as_str).filter(|s|!s.trim().is_empty()).ok_or("未找到订阅账号的登录凭据，请选择对应工具的登录文件")?.to_owned();
     let claims=token.split('.').nth(1).and_then(|b|base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(b).ok()).and_then(|b|serde_json::from_slice::<Value>(&b).ok()).unwrap_or(Value::Null);
     let account_id=v.pointer("/tokens/account_id").or_else(||v.get("account_id")).and_then(Value::as_str).or_else(||claims.pointer("/https:~1~1api.openai.com~1auth/chatgpt_account_id").and_then(Value::as_str)).filter(|s|!s.is_empty()).map(str::to_owned);
     let identity=match provider{
@@ -242,8 +294,16 @@ fn http_agent()->ureq::Agent{
 fn fetch(agent:&ureq::Agent,account:&Account)->Result<Snapshot,(String,u64)>{
     if account.provider==Provider::GrokBot{return grok::fetch(agent,account);}
     if account.provider==Provider::Gemini{return gemini::fetch(agent,account);}
+    if account.provider==Provider::Harness{
+        // 这个来源不发任何网络请求，第一行就早退去读本地缓存。
+        let raw=fs::read(&account.source).map_err(|_|("读不到 DSH 的用量记录，请先运行一次 DSH".into(),0))?;
+        let mtime=fs::metadata(&account.source).and_then(|m|m.modified()).ok();
+        let cached:Value=serde_json::from_slice(&raw).map_err(|_|("DSH 用量记录格式无法识别".into(),60))?;
+        return harness::parse(&cached,mtime).map_err(|e|(e,60));
+    }
+    if account.provider==Provider::WorkBuddy{return workbuddy::fetch(agent,account);}
     let auth=account_credentials(account).map_err(|e|(e,0))?;
-    let url=match account.provider{Provider::Codex=>"https://chatgpt.com/backend-api/wham/usage",Provider::Claude=>"https://api.anthropic.com/api/oauth/usage",Provider::Kimi=>"https://api.kimi.com/coding/v1/usages",Provider::GrokBot|Provider::Gemini=>unreachable!()};
+    let url=match account.provider{Provider::Codex=>"https://chatgpt.com/backend-api/wham/usage",Provider::Claude=>"https://api.anthropic.com/api/oauth/usage",Provider::Kimi=>"https://api.kimi.com/coding/v1/usages",Provider::GrokBot|Provider::Gemini|Provider::Harness|Provider::WorkBuddy=>unreachable!()};
     let mut req=agent.get(url).set("Authorization",&format!("Bearer {}",auth.token)).set("Accept","application/json").set("User-Agent","codex-cli/Daozai");
     if account.provider==Provider::Codex{if let Some(id)=&auth.account_id{req=req.set("ChatGPT-Account-Id",id);}}
     if account.provider==Provider::Claude{req=req.set("anthropic-beta","oauth-2025-04-20");}
@@ -337,4 +397,42 @@ fn fetch(agent:&ureq::Agent,account:&Account)->Result<Snapshot,(String,u64)>{
     #[test] fn extra_codex_buckets_do_not_replace_main_windows(){let s=parse(Provider::Codex,&json!({"rate_limit":{"secondary_window":{"used_percent":20,"limit_window_seconds":604800}},"additional_rate_limits":[{"limit_name":"reserve","rate_limit":{"primary_window":{"used_percent":80,"limit_window_seconds":604800}}}]})).unwrap();assert_eq!(s.windows.len(),1);assert_eq!(s.extra[0].remaining,20.0);assert_eq!(s.windows[0].remaining,80.0);}
     #[test] fn claude_null_window_and_kimi_string_numbers(){let c=parse(Provider::Claude,&json!({"five_hour":null,"seven_day":{"utilization":60,"resets_at":"2030-01-01T12:00:00Z"}})).unwrap();assert_eq!(c.rings().len(),1);assert!(c.windows[0].reset.is_some());let k=parse(Provider::Kimi,&json!({"usage":{"limit":"100","remaining":"70"},"limits":[{"window":{"duration":300,"timeUnit":"TIME_UNIT_MINUTE"},"detail":{"limit":"20","used":"5"}}]})).unwrap();assert_eq!(k.rings().len(),2);assert_eq!(k.rings()[0].remaining,75.0);}
     #[test] fn multi_account_config_keeps_sources_and_selection_separate(){let mut c=Config::default();for n in 1..=2{c.accounts.push(Account{id:n.to_string(),provider:Provider::Codex,alias:format!("账号 {n}"),source:PathBuf::from(format!("profile-{n}/auth.json")),slot:None,enabled:true,pinned:true});}c.selected="2".into();let raw=c.json();assert_eq!(Config::from_json(&raw),c);assert_eq!(c.selected_index(),Some(1));assert_eq!(c.pinned_indices(),vec![0,1]);assert!(!raw.to_string().contains("access_token"));}
+    #[test]
+    fn provider_aliases_cover_new_sources(){
+        assert_eq!(Provider::parse("harness"),Some(Provider::Harness));
+        assert_eq!(Provider::parse("dsh"),Some(Provider::Harness));
+        assert_eq!(Provider::parse("workbuddy"),Some(Provider::WorkBuddy));
+        assert_eq!(Provider::parse("codebuddy"),Some(Provider::WorkBuddy));
+    }
+    #[test]
+    fn accent_deep_is_separate_from_brand(){
+        assert_eq!(Accent::parse("deep"),Accent::Deep);
+        assert_eq!(Accent::Deep.label(),"鲸蓝");
+        assert_ne!(Accent::Deep,Accent::Brand);
+    }
+    #[test]
+    fn json_roundtrip_keeps_new_providers_without_tokens(){
+        let dir=std::env::temp_dir().join(format!("daozai-newprov-{}",std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&dir).unwrap();
+        let dshw=dir.join(".dshw-usage.json");
+        fs::write(&dshw,json!({"lastBalance":22.88,"todayUsage":3.98}).to_string()).unwrap();
+        let wb=dir.join(".workbuddy-accounts.json");
+        // 放假 token，专门验证它们不会被写进岛仔自己的配置。
+        let wb_payload=json!({"version":1,"accounts":[{"uid":"u1","nickname":"SST","domain":"www.codebuddy.cn",
+            "accessToken":"secret-at","refreshToken":"secret-rt",
+            "expiresAtMs":chrono::Utc::now().timestamp_millis()+999_999_999,"enabled":true}]});
+        fs::write(&wb,wb_payload.to_string()).unwrap();
+        let mut config=Config::default();
+        config.add(Provider::Harness,String::new(),dshw).unwrap();
+        config.add(Provider::WorkBuddy,String::new(),wb).unwrap();
+        assert_eq!(config.accounts.len(),2);
+        let raw=config.json().to_string();
+        assert!(!raw.contains("secret-at"));
+        assert!(!raw.contains("secret-rt"));
+        assert!(!raw.contains("accessToken"));
+        assert!(!raw.contains("refreshToken"));
+        assert!(raw.contains("DeepSeek Harness"));
+        assert_eq!(Config::from_json(&config.json()),config,"新来源应能完整往返且不丢字段");
+        let _=fs::remove_dir_all(&dir);
+    }
 }
