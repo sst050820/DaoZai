@@ -80,23 +80,27 @@ fn default_cap(a:&Account,snapshot:Option<&Snapshot>)->Option<f64>{
 }
 fn ring(c:&Card,a:&Account,snapshot:Option<&Snapshot>,x:f32,y:f32,size:f32,colors:[Color32;2],cap:Option<f64>){
     let windows=snapshot.map(Snapshot::rings).unwrap_or_default();let dual=windows.len()>1;
-    // 余额/积分：一律画成「已用 / 上限」的进度环，超过 100% 时溢出那截不延长外圈，
+    // 余额/积分：一律画成「分子 / 分母」的进度环，超过 100% 时溢出那截不延长外圈，
     // 而是绕进内圈，两圈叠在一起——外圈永远停在满格，「刚好满」和「已经超了」一眼能分开。
     //
-    // 「已用」的口径按来源分开：额度类（WorkBuddy 的积分包）有服务端的已用量，用它；
-    // 余额类（DSH）只看余额本身——已用 = 上限 − 余额。余额来源不碰「今日用量」，
-    // 那个数每天清零，会把人误导成「这个环在量今天的消耗」。
+    // 口径按来源分开：
+    // - 余额类（DSH）：分子 = 余额，分母 = 总额（默认 50 元）。余额越多环越满。
+    //   不看「今日用量」——那个数每天清零，和「还剩多少」不是一回事；
+    // - 额度类（WorkBuddy 的积分包）：分子 = 服务端给的已用量，分母 = 购买总量。
     if let Some(reading)=snapshot.and_then(|s|s.reading.as_ref()){
         let col=colors[0];
         let stroke=(size*0.078).clamp(2.0,4.6);
         let radius=size/2.0-2.0;
-        let used=match (reading.used,reading.cap){
-            (Some(used),Some(natural))=>Some(used),
-            _=>reading.cap.map(|_|(cap.unwrap_or(reading.value.max(0.0))-reading.value).max(0.0)),
+        // 分子也分两种来源：余额类取「余额」，额度类取「已用」。
+        let numerator=match reading.used{
+            Some(used)=>used,
+            None if reading.value>=0.0=>reading.value,
+            None=>0.0,
         };
-        let ratio=cap.and_then(|cap|used.filter(|_|cap>0.0).map(|used|(used/cap) as f32));
+        let ratio=cap.map(|cap|(numerator as f32/cap as f32).max(0.0));
         let start=-std::f32::consts::FRAC_PI_2;
-        // 底环按「已用比例」画一段暗弧，剩下的留空：余额还多的时候，环本来就该大部分是空的。
+        // 底环按「已画比例」补一段暗弧，剩下的留空——满格之后还有一段空着的暗弧，
+        // 一眼能看出离满还有多远。
         match ratio{
             Some(r)=>{
                 let lit=crate::paint::mix(col,Color32::BLACK,0.72);
@@ -266,16 +270,17 @@ impl App {
                 ui.allocate_ui_with_layout(egui::vec2(ui.available_width(),30.0),egui::Layout::left_to_right(egui::Align::Center),|ui|{ui.label(egui::RichText::new(a.provider.name()).strong());ui.add_sized([150.0,25.0],egui::TextEdit::singleline(&mut a.alias).vertical_align(egui::Align::Center).hint_text("账号备注"));if a.provider==Provider::GrokBot && ui.add_enabled(self.quota.login.is_none(),egui::Button::new("重新连接").small()).clicked(){reconnect=Some(a.alias.clone());}if a.provider==Provider::Gemini && ui.add_enabled(self.quota.gemini_connecting.is_none(),egui::Button::new("重新连接").small()).clicked(){gemini_reconnect=Some((a.alias.clone(),a.slot.clone()));}if ui.add_enabled(a.provider!=Provider::Gemini || self.quota.gemini_connecting.is_none(),egui::Button::new("移除").small()).clicked(){remove=Some(a.id.clone());}});
                 ui.horizontal(|ui|{ui.checkbox(&mut a.enabled,"监控");ui.checkbox(&mut a.pinned,"常驻刘海");if ui.selectable_label(self.quota.config.selected==a.id,"当前账号").clicked(){self.quota.config.selected=a.id.clone();}});
                 let mut color=self.quota.config.colors.get(&a.id).copied().unwrap_or_default();color_picker(ui,a.provider,&mut color);if color==Accent::Brand{self.quota.config.colors.remove(&a.id);}else{self.quota.config.colors.insert(a.id.clone(),color);}
-                // 绝对值来源要有分母才能画进度：上限用来定义 100%，超出时圆环内圈多绕一圈。
+                // 绝对值来源要有分母才能画进度：余额画「余额 / 总额」，积分画「已用 / 总量」。
                 if matches!(a.provider,Provider::Harness|Provider::WorkBuddy){
                     let fallback=a.provider.default_cap();
                     let mut cap=self.quota.config.caps.get(&a.id).copied().or(fallback).unwrap_or(0.0);
                     ui.horizontal(|ui|{
-                        ui.label(egui::RichText::new("上限").size(12.0));
+                        let label=if a.provider==Provider::Harness{"总额"}else{"上限"};
+                        ui.label(egui::RichText::new(label).size(12.0));
                         let changed=ui.add(egui::DragValue::new(&mut cap).speed(1.0).range(0.0..=1_000_000.0)).changed();
                         ui.label(egui::RichText::new(a.provider.cap_unit()).size(11.0));
                         if changed{if cap>0.0{self.quota.config.caps.insert(a.id.clone(),cap);}else{self.quota.config.caps.remove(&a.id);}}
-                        let hint=match a.provider{Provider::WorkBuddy=>"默认取购买总量，调小就能看到溢出内圈",_=>"默认按 50 元总额：已用 = 总额 − 余额"};
+                        let hint=match a.provider{Provider::WorkBuddy=>"默认取购买总量，调小就能看到溢出内圈",_=>"默认按 50 元总额：圆环画 余额 / 总额"};
                         ui.label(egui::RichText::new(hint).size(11.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_gray(170),Color32::from_gray(85))));
                     });
                 }

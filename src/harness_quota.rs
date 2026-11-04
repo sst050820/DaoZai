@@ -44,8 +44,8 @@ pub fn parse(v: &Value, mtime: Option<SystemTime>) -> Result<Snapshot, String> {
         Some(n) if n.is_finite() && n >= 0.0 => n,
         _ => return Err("DSH 还没有余额记录，先打开一次 DSH 再刷新".into()),
     };
-    // 余额本身没有分母：进度环的口径是「总额 − 余额」，总额默认 50 元、可在设置里改。
-    // `used` 留空，表示这个来源没有服务端的已用量，由 `ring` 按余额反推。
+    // 余额本身没有分母：进度环的口径是「余额 / 总额」，总额默认 50 元、可在设置里改。
+    // `used` 留空，表示这个来源没有服务端的已用量，由 `ring` 直接用余额当分子。
     let mut caption = format!("账户余额 {:.2} 元", balance);
     // 缓存陈旧只标注、不报错：关掉 DSH 后数值停在最后一次刷新，用户需要知道它不是实时的。
     if let Some(mtime) = mtime {
