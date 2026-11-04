@@ -284,6 +284,8 @@ fn cursor_shapes(at: Pos2, press: f32, dragging: Option<f32>) -> Vec<Shape> {
 
 fn main() {
     if std::env::args().any(|a|a=="--gallery"){gallery();return;}
+    // --video <mp4> 的真桌面预览：还给程序取合并到屏幕顶部居中，用来核对实机上的实际观感。
+    if std::env::args().any(|a|a=="--desktop"){desktop_preview();return;}
     let out_path = std::env::args().nth(1).unwrap_or_else(|| "daozai-demo.mp4".into());
     let (root, drag_file) = setup_data();
 
@@ -524,6 +526,77 @@ fn main() {
     let _ = ff.wait();
     let _ = std::fs::remove_dir_all(root);
     eprintln!("{frame_no} 帧 → {out_path}");
+}
+
+/// 真桌面预览：和实机 shell 一样把岛画在屏幕顶部居中、窗口内铺满，导出一张 PNG。
+///
+/// gallery 默认把岛画在窗口左上角，看不出「悬浮在任务栏中间」的实际观感；
+/// 这里按主屏分辨率生成画布，岛窗口水平居中、贴顶，用来核对像素对齐。
+fn desktop_preview() {
+    let (root, _) = setup_data();
+    let dest = std::env::args().nth(2).unwrap_or_else(|| "desktop.png".into());
+    let screen_w: usize = std::env::var("DAOZAI_SCREEN_W").ok().and_then(|v| v.parse().ok()).unwrap_or(1707);
+    let screen_h: usize = std::env::var("DAOZAI_SCREEN_H").ok().and_then(|v| v.parse().ok()).unwrap_or(960);
+    let ppp = 2.0_f32;
+    let ctx = egui::Context::default();
+    let mut app = App::new(&ctx, Options { fetch_lyrics: false, pet_idle: 45.0 });
+    let mut ras = raster::Raster::new(screen_w, screen_h);
+    let mut rgba = vec![];
+    let mut caps: Option<crate::raster::Raster> = None;
+    let win_left = ((screen_w as f32 - 640.0 * ppp) / 2.0).round();
+    for frame in 0..75 {
+        let t = frame as f64 / 60.0;
+        if frame == 0 { app.quota_demo("single"); app.quota_demo_focus("demo-3", None); }
+        app.show_page(6);
+        let env = Env { t, clock: "10:28:00".into(), today: "2026-10-28".into(), date: "10月28日 周三".into(), battery: Some(76), charging: true, cursor: None, ..Default::default() };
+        let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(640.0, 190.0))), time: Some(t), viewports: std::iter::once((egui::ViewportId::ROOT, egui::ViewportInfo { native_pixels_per_point: Some(ppp), ..Default::default() })).collect(), ..Default::default() };
+        let mut out = None;
+        let output = ctx.run(raw, |ctx| {
+            egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx, |ui| { let win = ui.max_rect(); out = Some(app.frame(ui, win, &env)); });
+        });
+        ras.update_textures(&output.textures_delta);
+        if frame == 74 {
+            let mut layer = raster::Raster::new(640 * 2, 190 * 2);
+            layer.buf.fill([0.0, 0.0, 0.0, 0.0]);
+            layer.draw(&ctx.tessellate(output.shapes, output.pixels_per_point), output.pixels_per_point);
+            caps = Some(layer);
+        }
+        ras.free_textures(&output.textures_delta);
+    }
+    // 桌面底色（Windows 11 深色壁纸的近似色），再把岛窗口贴到顶部居中。
+    let mut canvas = vec![0u8; screen_w * screen_h * 4];
+    for y in 0..screen_h {
+        for x in 0..screen_w {
+            let i = (y * screen_w + x) * 4;
+            canvas[i] = 30; canvas[i + 1] = 30; canvas[i + 2] = 34; canvas[i + 3] = 255;
+        }
+    }
+    if let Some(layer) = caps {
+        let ox = win_left as i64;
+        let lw = (640 * 2) as i64;
+        let lh = (190 * 2) as i64;
+        for y in 0..lh {
+            for x in 0..lw {
+                let dx = ox + x;
+                if dx < 0 || dx >= screen_w as i64 || y >= screen_h as i64 { continue; }
+                let si = (y * lw + x) as usize;
+                let di = ((y * screen_w as i64 + dx) * 4) as usize;
+                let px = layer.buf[si];
+                let a = (px[3].clamp(0.0, 1.0) * 255.0).round() as u32;
+                for k in 0..3 {
+                    let src = (px[k].clamp(0.0, 1.0) * 255.0).round() as u32;
+                    let dst = canvas[di + k] as u32;
+                    canvas[di + k] = ((src * a + dst * (255 - a)) / 255) as u8;
+                }
+                canvas[di + 3] = 255;
+            }
+        }
+    }
+    rgba = canvas;
+    let mut ff = Command::new("ffmpeg").args(["-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", &format!("{screen_w}x{screen_h}"), "-i", "-", "-frames:v", "1", &dest]).stdin(Stdio::piped()).spawn().unwrap();
+    ff.stdin.take().unwrap().write_all(&rgba).unwrap();
+    assert!(ff.wait().unwrap().success());
+    let _ = std::fs::remove_dir_all(root);
 }
 
 /// 将实际渲染的六个页面、休息状态与提醒导出，供回归检查。
