@@ -70,6 +70,14 @@ fn logo(c:&Card,provider:Provider,x:f32,y:f32,size:f32){
 }
 /// 「超出上限」的颜色：橙。和任何厂商主色都不撞，也不像报错的红。
 const OVER: Color32 = Color32::from_rgb(255, 148, 48);
+/// 上限的默认值。余额类来源（DSH）只有在真拿到读数时才套默认预算：
+/// 还没同步到数据时不应先画出一个「已用 xx%」的假进度。
+fn default_cap(a:&Account,snapshot:Option<&Snapshot>)->Option<f64>{
+    match a.provider{
+        crate::quota::Provider::Harness if snapshot.and_then(|s|s.reading.as_ref()).is_none()=>None,
+        provider=>provider.default_cap(),
+    }
+}
 fn ring(c:&Card,a:&Account,snapshot:Option<&Snapshot>,x:f32,y:f32,size:f32,colors:[Color32;2],cap:Option<f64>){
     let windows=snapshot.map(Snapshot::rings).unwrap_or_default();let dual=windows.len()>1;
     // 余额/积分：有「已用 / 上限」就画进度；超过 100% 时溢出那截不延长外圈，而是绕进内圈，
@@ -186,7 +194,7 @@ impl App {
             let faded=c.faded(alpha);let faded=if alpha<0.8{faded.ghost()}else{faded};let c=&faded;
             let a=&self.quota.config.accounts[*i];let x=cx+layout.x[crate::bar_layout::QUOTA+position].unwrap();
             let snapshot=self.quota.rows.get(&a.id).and_then(|r|r.as_ref().ok());
-            let cap=self.quota.config.caps.get(&a.id).copied().or_else(||snapshot.and_then(|s|s.reading.as_ref()).and_then(|r|r.cap)).or_else(||a.provider.default_cap());
+            let cap=self.quota.config.caps.get(&a.id).copied().or_else(||snapshot.and_then(|s|s.reading.as_ref()).and_then(|r|r.cap)).or_else(||default_cap(a,snapshot));
             ring(c,a,snapshot,x,15.0,27.0,accent_colors(&self.quota.config,a),cap);
             let mut same=self.quota.config.accounts.iter().filter(|other|other.provider==a.provider && other.enabled);
             if same.clone().count()>1{let n=same.position(|other|other.id==a.id).unwrap_or(0)+1;c.circle(x+10.0,24.0,4.5,Color32::from_gray(225));c.text(x+10.0,26.8,&n.to_string(),6.5,W::Bold,Color32::BLACK,H::Center);}
@@ -212,7 +220,7 @@ impl App {
         let a=&self.quota.config.accounts[selected];let result=self.quota.rows.get(&a.id);let snapshot=result.and_then(|r|r.as_ref().ok());
         let colors=accent_colors(&self.quota.config,a);
         // 上限：用户设的优先，其次来源自带的总量，最后才用厂商默认值。
-        let cap=self.quota.config.caps.get(&a.id).copied().or_else(||snapshot.and_then(|s|s.reading.as_ref()).and_then(|r|r.cap)).or_else(||a.provider.default_cap());
+        let cap=self.quota.config.caps.get(&a.id).copied().or_else(||snapshot.and_then(|s|s.reading.as_ref()).and_then(|r|r.cap)).or_else(||default_cap(a,snapshot));
         ring(c,a,snapshot,105.0,100.0,88.0,colors,cap);
         let raw_plan=snapshot.map(|s|s.plan.as_str()).unwrap_or_default();let plan=match raw_plan{"pro"|"prolite"|"pro_lite"=>"Pro","plus"=>"Plus","free"=>"Free","team"|"business"=>"Business","enterprise"=>"Enterprise",other=>other};let label=if plan.is_empty(){a.provider.name().to_owned()}else{format!("{} · {}",a.provider.name(),plan)};
         c.text(157.0,64.0,&c.fit(&label,12.0,W::Semibold,145.0),12.0,W::Semibold,theme::WHITE,H::Left);
@@ -253,8 +261,8 @@ impl App {
                 let mut color=self.quota.config.colors.get(&a.id).copied().unwrap_or_default();color_picker(ui,a.provider,&mut color);if color==Accent::Brand{self.quota.config.colors.remove(&a.id);}else{self.quota.config.colors.insert(a.id.clone(),color);}
                 // 绝对值来源要有分母才能画进度：上限用来定义 100%，超出时圆环内圈多绕一圈。
                 if matches!(a.provider,Provider::Harness|Provider::WorkBuddy){
-                    let default_cap=a.provider.default_cap();
-                    let mut cap=self.quota.config.caps.get(&a.id).copied().or(default_cap).unwrap_or(0.0);
+                    let fallback=a.provider.default_cap();
+                    let mut cap=self.quota.config.caps.get(&a.id).copied().or(fallback).unwrap_or(0.0);
                     ui.horizontal(|ui|{
                         ui.label(egui::RichText::new("上限").size(12.0));
                         let changed=ui.add(egui::DragValue::new(&mut cap).speed(1.0).range(0.0..=1_000_000.0)).changed();
