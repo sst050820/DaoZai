@@ -155,6 +155,14 @@ fn build_fonts()->FontDefinitions {
         find(&[("msyhbd.ttc", 1), ("NotoSansSC-Medium.otf", 0), ("NotoSansCJK-Medium.ttc", 2)], &dirs),
         find(&[("msyhbd.ttc", 1), ("NotoSansSC-Bold.otf", 0), ("NotoSansCJK-Bold.ttc", 2)], &dirs),
     ];
+    // 韩文：Segoe UI 与微软雅黑都不含谚文音节，歌词里韩文会逐字落成方框 ▯。
+    // 接一套系统韩文字体在链尾（只在前面都没有该字形时才轮到，中英文排版不受影响）。
+    // 只从系统路径运行时读取，不打包进 exe。
+    let korean = [
+        find(&[("malgun.ttf", 0), ("NotoSansKR-Regular.otf", 0), ("NotoSansCJK-Regular.ttc", 0)], &dirs),
+        find(&[("malgunbd.ttf", 0), ("malgun.ttf", 0), ("NotoSansKR-Medium.otf", 0)], &dirs),
+        find(&[("malgunbd.ttf", 0), ("malgun.ttf", 0), ("NotoSansKR-Bold.otf", 0)], &dirs),
+    ];
 
     let mut fonts = FontDefinitions::default();
     let mut cache: Vec<(PathBuf, u32, String)> = Vec::new();
@@ -184,6 +192,9 @@ fn build_fonts()->FontDefinitions {
         if let Some(k) = add(&mut fonts, &cjk[i], format!("cjk{i}")) {
             list.push(k);
         }
+        if let Some(k) = add(&mut fonts, &korean[i], format!("korean{i}")) {
+            list.push(k);
+        }
         list.extend(builtin.iter().cloned());
         fonts.families.insert(fam.clone(), list);
     }
@@ -201,6 +212,8 @@ pub fn app_icon()->std::sync::Arc<eframe::egui::IconData>{
 
 #[cfg(test)]
 mod tests {
+    use eframe::egui;
+
     #[cfg(windows)]
     #[test]
     fn mapped_fonts_prevent_in_place_writes_and_keep_shared_reads(){
@@ -226,6 +239,25 @@ mod tests {
         assert!(count>0,"中文字体仍占用完整的私有堆副本，没有复用系统字体文件页");
         let name=String::from_utf16_lossy(&name[..count as usize]).to_lowercase();
         assert!([".ttc",".ttf",".otf"].iter().any(|suffix|name.ends_with(suffix)),"映射必须来自实际字体文件");
+    }
+
+    #[test]
+    fn korean_lyrics_do_not_fall_back_to_tofu_boxes(){
+        let dirs=super::font_dirs();
+        if super::find(&[("malgun.ttf",0),("NotoSansKR-Regular.otf",0),("NotoSansCJK-Regular.ttc",0)],&dirs).is_none(){
+            // 精简系统可能没装韩文字体：此时链尾自动跳过，不该因此崩溃。
+            return;
+        }
+        let ctx=egui::Context::default();
+        ctx.set_fonts(super::shared_fonts().clone());
+        // 字体要等第一次 run 之后才能取用。
+        let _=ctx.run(egui::RawInput::default(),|_|{});
+        // egui 找不到字形时会退成替换方块，advance 只有 0.5pt；正常谚文音节宽度远大于此。
+        let has_hangul=|text:&str,font:egui::FontId|ctx.fonts(|fonts|fonts.layout_no_wrap(text.to_owned(),font,egui::Color32::WHITE).rows.iter().all(|row|row.glyphs.iter().filter(|g|('가'..='힣').contains(&g.chr)).all(|g|g.advance_width>4.0)));
+        assert!(has_hangul("사랑은 늘 도망가",super::font(12.0,super::W::Regular)),"常规字重的韩文歌词不应落成 ▯");
+        assert!(has_hangul("사랑은 늘 도망가",super::font(12.0,super::W::Semibold)),"半粗字重的韩文歌词不应落成 ▯");
+        assert!(has_hangul("사랑은 늘 도망가",super::font(12.0,super::W::Bold)),"粗字重的韩文歌词不应落成 ▯");
+        assert!(has_hangul("中文歌词 English 123",super::font(12.0,super::W::Regular)),"加了韩文回退后中英文仍要可排版");
     }
 
     #[test]

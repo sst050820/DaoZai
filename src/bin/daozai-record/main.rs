@@ -605,10 +605,18 @@ fn gallery() {
     let (root,_)=setup_data();
     let dest=std::env::args().nth(2).unwrap_or_else(||"preview".into());
     std::fs::create_dir_all(&dest).unwrap();
-    for scene in 0..22 {
+    // 22：韩文歌词。Segoe UI / 微软雅黑都没有谚文字形，靠链尾的韩文字体兜底，
+    // 岛上的单行歌词条和展开后的歌词卡片都要没有 ▯。
+    for scene in 0..23 {
         let ctx=egui::Context::default();
         let mut app=App::new(&ctx,Options{fetch_lyrics:false,pet_idle:45.0});
         app.settings.pet=true;
+        if scene==22 {
+            let lrc="[00:00.00]뭐 해?\n[00:06.00]오늘 하루 어땠어 너는\n[00:12.00]별일 없이 지나갔니\n[00:18.00]가을 바람이 부네\n[00:24.00]사랑은 늘 도망가\n[00:30.00]너도 나를 떠나가";
+            app.set_lyrics("뭐 해?","아이유",214.0,lyrics::parse_lrc(lrc));
+            app.settings.island_lyrics=true;
+            app.settings.lyrics_enabled=true;
+        }
         let mut ras=raster::Raster::new(1280,380);
         let mut rgba=vec![];
         for frame in 0..75 {
@@ -622,9 +630,12 @@ fn gallery() {
             // 额度页要单独出图：它的面板比别页高（QUOTA_H），要确认大环不被卡片裁掉。
             // 18 是余额环（22.88 / 总额 50），19 是总额调小后的内圈溢出，20 是溢出叠满半圈，
             // 21 是 Codex 的百分比环——三种来源并排比，最外环必须是同一个外径和线宽。
-            if scene>=18 {if frame==0 {app.quota_demo("single");match scene{18=>app.quota_demo_focus("demo-3",None),19=>app.quota_demo_focus("demo-4",Some(400.0)),20=>app.quota_demo_focus("demo-4",Some(300.0)),_=>app.quota_demo_focus("demo-0",None),}} app.show_page(6);}
+            if scene>=18 && scene<22 {if frame==0 {app.quota_demo("single");match scene{18=>app.quota_demo_focus("demo-3",None),19=>app.quota_demo_focus("demo-4",Some(400.0)),20=>app.quota_demo_focus("demo-4",Some(300.0)),_=>app.quota_demo_focus("demo-0",None),}} app.show_page(6);}
             let idle=if scene==7{60.0}else if scene==8{200.0}else{0.0};
-            let env=Env{t,clock:"10:28:00".into(),today:"2026-10-28".into(),date:"10月28日 周三".into(),battery:Some(76),charging:true,cursor:if scene<6{Some(Pos2::new(320.0,60.0))}else{None},idle_seconds:Some(idle),..Default::default()};
+            let mut env=Env{t,clock:"10:28:00".into(),today:"2026-10-28".into(),date:"10月28日 周三".into(),battery:Some(76),charging:true,cursor:if scene<6{Some(Pos2::new(320.0,60.0))}else{None},idle_seconds:Some(idle),..Default::default()};
+            if scene==22 {
+                env.media=NowPlaying{title:"뭐 해?".into(),artist:"아이유".into(),playing:false,position:8.0,duration:214.0,..Default::default()};
+            }
             let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(640.0,190.0))),time:Some(t),viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(2.0),..Default::default()})).collect(),..Default::default()};
             let output=ctx.run(raw,|ctx|{egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::from_rgb(23,28,45))).show(ctx,|ui|{let win=ui.max_rect();app.frame(ui,win,&env);});});
             ras.update_textures(&output.textures_delta);
