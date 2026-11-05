@@ -56,12 +56,10 @@ fn logo_texture(ctx:&egui::Context,provider:Provider,pixels:u32)->Option<egui::T
     if let Some(texture)=ctx.data_mut(|data|data.get_temp::<egui::TextureHandle>(key)){return Some(texture);}
     let bytes:&[u8]=match provider{Provider::Codex=>include_bytes!("../assets/ai-icons/codex.svg"),Provider::Claude=>include_bytes!("../assets/ai-icons/claude.svg"),Provider::Kimi=>include_bytes!("../assets/ai-icons/kimi.svg"),Provider::GrokBot=>include_bytes!("../assets/ai-icons/grokbot.svg"),Provider::Gemini=>include_bytes!("../assets/ai-icons/gemini.svg"),Provider::Harness=>include_bytes!("../assets/ai-icons/harness.svg"),Provider::WorkBuddy=>include_bytes!("../assets/ai-icons/workbuddy.svg")};
     let mut image=egui_extras::image::load_svg_bytes_with_size(bytes,Some(egui::load::SizeHint::Size(pixels,pixels))).ok()?;
-    // DeepSeek Harness 与 WorkBuddy 用官方主色（灰底白鲸鱼 / 青绿底白机器人），
-    // 便于在圆环里一眼认出是哪个软件；其余来源仍是白色单色标识。
-    if !matches!(provider,Provider::Harness|Provider::WorkBuddy){
-        // 白色标识使用矢量覆盖率，避免透明边缘再次变暗。
-        for pixel in &mut image.pixels{*pixel=Color32::from_white_alpha(pixel.a());}
-    }
+    // 所有来源统一刷成白色单色标识（鲸鱼 / 小机器人也是白线条，不带底色方块），
+    // 这样图标落在彩色圆环里时露出的是环本身的颜色。
+    // 白色标识使用矢量覆盖率，避免透明边缘再次变暗。
+    for pixel in &mut image.pixels{*pixel=Color32::from_white_alpha(pixel.a());}
     let texture=ctx.load_texture(format!("quota-logo-{}-{pixels}",provider.name()),image,egui::TextureOptions::LINEAR);
     ctx.data_mut(|data|data.insert_temp(key,texture.clone()));Some(texture)
 }
@@ -420,13 +418,7 @@ mod tests {
                 for v in &mesh.vertices {
                     assert!((v.pos.x*scale-(v.pos.x*scale).round()).abs()<0.001 && (v.pos.y*scale-(v.pos.y*scale).round()).abs()<0.001,"图标边界应对齐物理像素");
                 }
-                if let egui::ImageData::Color(image)=image {
-                    // DSH / WorkBuddy 用官方主色的圆形标记，其余来源仍是纯白单色标识。
-                    let brand=matches!(provider,Provider::Harness|Provider::WorkBuddy);
-                    let colored=image.pixels.iter().any(|p|p.r()!=p.g()||p.g()!=p.b());
-                    if brand {assert!(colored,"带主色的厂商图标应保留原本颜色，厂商={}",provider.name());}
-                    else {for pixel in &image.pixels {assert_eq!(*pixel,Color32::from_white_alpha(pixel.a()),"白色标识的透明边缘不应发灰");}}
-                }
+                if let egui::ImageData::Color(image)=image {for pixel in &image.pixels {assert_eq!(*pixel,Color32::from_white_alpha(pixel.a()),"白色标识的透明边缘不应发灰");}}
             }}
         }
     }
