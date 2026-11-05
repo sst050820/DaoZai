@@ -607,10 +607,13 @@ fn gallery() {
     std::fs::create_dir_all(&dest).unwrap();
     // 22：韩文歌词。Segoe UI / 微软雅黑都没有谚文字形，靠链尾的韩文字体兜底，
     // 岛上的单行歌词条和展开后的歌词卡片都要没有 ▯。
-    for scene in 0..23 {
+    // 23：常驻栏里的额度图标（DSH 鲸鱼 / WorkBuddy 机器人），27px 环内 14px 图标，
+    // 用来看这两个带主色的图标在真实尺寸下是否还认得出官方标记。
+    for scene in 0..24 {
         let ctx=egui::Context::default();
         let mut app=App::new(&ctx,Options{fetch_lyrics:false,pet_idle:45.0});
         app.settings.pet=true;
+        if scene==23 {app.quota_demo_icons();}
         if scene==22 {
             let lrc="[00:00.00]뭐 해?\n[00:06.00]오늘 하루 어땠어 너는\n[00:12.00]별일 없이 지나갔니\n[00:18.00]가을 바람이 부네\n[00:24.00]사랑은 늘 도망가\n[00:30.00]너도 나를 떠나가";
             app.set_lyrics("뭐 해?","아이유",214.0,lyrics::parse_lrc(lrc));

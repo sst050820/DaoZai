@@ -56,8 +56,12 @@ fn logo_texture(ctx:&egui::Context,provider:Provider,pixels:u32)->Option<egui::T
     if let Some(texture)=ctx.data_mut(|data|data.get_temp::<egui::TextureHandle>(key)){return Some(texture);}
     let bytes:&[u8]=match provider{Provider::Codex=>include_bytes!("../assets/ai-icons/codex.svg"),Provider::Claude=>include_bytes!("../assets/ai-icons/claude.svg"),Provider::Kimi=>include_bytes!("../assets/ai-icons/kimi.svg"),Provider::GrokBot=>include_bytes!("../assets/ai-icons/grokbot.svg"),Provider::Gemini=>include_bytes!("../assets/ai-icons/gemini.svg"),Provider::Harness=>include_bytes!("../assets/ai-icons/harness.svg"),Provider::WorkBuddy=>include_bytes!("../assets/ai-icons/workbuddy.svg")};
     let mut image=egui_extras::image::load_svg_bytes_with_size(bytes,Some(egui::load::SizeHint::Size(pixels,pixels))).ok()?;
-    // 白色标识使用矢量覆盖率，避免透明边缘再次变暗。
-    for pixel in &mut image.pixels{*pixel=Color32::from_white_alpha(pixel.a());}
+    // DeepSeek Harness 与 WorkBuddy 用官方主色（灰底白鲸鱼 / 青绿底白机器人），
+    // 便于在圆环里一眼认出是哪个软件；其余来源仍是白色单色标识。
+    if !matches!(provider,Provider::Harness|Provider::WorkBuddy){
+        // 白色标识使用矢量覆盖率，避免透明边缘再次变暗。
+        for pixel in &mut image.pixels{*pixel=Color32::from_white_alpha(pixel.a());}
+    }
     let texture=ctx.load_texture(format!("quota-logo-{}-{pixels}",provider.name()),image,egui::TextureOptions::LINEAR);
     ctx.data_mut(|data|data.insert_temp(key,texture.clone()));Some(texture)
 }
@@ -369,6 +373,24 @@ impl App {
         self.quota.config.caps.insert("demo-4".into(),400.0);
         self.quota.config.selected="demo-0".into();self.show_page(6);if self.settings_open{self.settings_tab=11;}
     }
+    /// 录制专用：常驻栏里只放 DSH 与 WorkBuddy 两个账号，用来核对 14px 图标
+    /// 在真实任务栏尺寸下是否还能认出官方标记（鲸鱼 / 机器人）。
+    #[cfg(feature="record")]
+    pub fn quota_demo_icons(&mut self){
+        use crate::quota::Reading;
+        self.quota=State::default();
+        let accounts:[(Provider,&str,Reading);2]=[
+            (Provider::Harness,"DSH",Reading{value:22.88,unit:"元",caption:"账户余额 22.88 元".into(),used:None,cap:None}),
+            (Provider::WorkBuddy,"WorkBuddy",Reading{value:478.0,unit:"分",caption:"7 个积分包".into(),used:Some(2100.0),cap:Some(2578.0)}),
+        ];
+        for(i,(provider,alias,reading))in accounts.into_iter().enumerate(){
+            let id=format!("demo-i{i}");
+            self.quota.config.accounts.push(Account{id:id.clone(),provider,alias:alias.into(),source:format!("demo-{i}.json").into(),slot:None,enabled:true,pinned:true});
+            self.quota.rows.insert(id,Ok(Snapshot{plan:alias.into(),windows:vec![],extra:vec![],reading:Some(reading),at:chrono::Utc::now().timestamp()}));
+        }
+        self.quota.config.caps.insert("demo-i1".into(),400.0);
+        self.quota.config.selected="demo-i0".into();
+    }
     /// 录制专用：DSH 账号还在，但本轮还没同步到读数（刚启动、读缓存失败）。
     /// 用来核对「还没数」时环上不该出现假进度。
     #[cfg(feature="record")]
@@ -398,7 +420,13 @@ mod tests {
                 for v in &mesh.vertices {
                     assert!((v.pos.x*scale-(v.pos.x*scale).round()).abs()<0.001 && (v.pos.y*scale-(v.pos.y*scale).round()).abs()<0.001,"图标边界应对齐物理像素");
                 }
-                if let egui::ImageData::Color(image)=image {for pixel in &image.pixels {assert_eq!(*pixel,Color32::from_white_alpha(pixel.a()),"白色标识的透明边缘不应发灰");}}
+                if let egui::ImageData::Color(image)=image {
+                    // DSH / WorkBuddy 用官方主色的圆形标记，其余来源仍是纯白单色标识。
+                    let brand=matches!(provider,Provider::Harness|Provider::WorkBuddy);
+                    let colored=image.pixels.iter().any(|p|p.r()!=p.g()||p.g()!=p.b());
+                    if brand {assert!(colored,"带主色的厂商图标应保留原本颜色，厂商={}",provider.name());}
+                    else {for pixel in &image.pixels {assert_eq!(*pixel,Color32::from_white_alpha(pixel.a()),"白色标识的透明边缘不应发灰");}}
+                }
             }}
         }
     }

@@ -1,1 +1,24 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#fff" fill-rule="evenodd"><path d="M5.2 2.6h13.6a2.6 2.6 0 0 1 2.6 2.6v13.6a2.6 2.6 0 0 1-2.6 2.6H5.2a2.6 2.6 0 0 1-2.6-2.6V5.2a2.6 2.6 0 0 1 2.6-2.6Zm.4 4.2h12.8v2.2H5.6V6.8Zm0 4.4h12.8v2.2H5.6v-2.2Zm0 4.4h8.6v2.2H5.6v-2.2Z"/></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+  <defs>
+    <linearGradient id="wbBg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#00c9a7"/>
+      <stop offset="1" stop-color="#34c759"/>
+    </linearGradient>
+    <linearGradient id="wbFace" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#00c9a7"/>
+      <stop offset="1" stop-color="#2fc46b"/>
+    </linearGradient>
+    <clipPath id="wbClip"><circle cx="12" cy="12" r="12"/></clipPath>
+  </defs>
+  <g clip-path="url(#wbClip)">
+    <circle cx="12" cy="12" r="12" fill="url(#wbBg)"/>
+    <g transform="rotate(-33 12 12.4)">
+      <path fill="#fff" d="M9.5 7.2H14.0L11.0 1.6Z"/>
+      <path fill="#fff" d="M12.8 17.6H17.2L15.8 23.2Z"/>
+      <rect x="3.3" y="7.2" width="17.4" height="10.4" rx="4.5" fill="#fff"/>
+      <rect x="4.5" y="8.4" width="15.0" height="8.0" rx="3.5" fill="url(#wbFace)"/>
+      <rect x="9.4" y="11.0" width="1.8" height="2.8" rx="0.9" fill="#fff"/>
+      <rect x="13.1" y="11.0" width="1.8" height="2.8" rx="0.9" fill="#fff"/>
+    </g>
+  </g>
+</svg>
