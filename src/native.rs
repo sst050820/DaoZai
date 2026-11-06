@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use crate::poll_clock::PollClock;
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{CreateRectRgn, DeleteObject, SetWindowRgn};
 use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
@@ -68,6 +68,21 @@ impl DragCapture {
     }
 }
 
+// 逐像素合成必须由 WS_EX_LAYERED 打开：没有它 DWM 会丢掉 GL 帧缓冲里的 alpha，
+// 本来透明的区域被填成纯黑（2026-11 在实测机上复现，官方原版同样中招）。
+// 必须在窗口第一次显示之前挂上，运行中补加无效；winit 只在 IGNORE_CURSOR_EVENT
+// 时才设这一位，eframe 的 ViewportBuilder 没有对应开关，所以这里自己补。
+fn enable_layered(hwnd:HWND)->windows::core::Result<()> {
+    unsafe {
+        let ex=GetWindowLongPtrW(hwnd,GWL_EXSTYLE);
+        if ex & WS_EX_LAYERED.0 as isize == 0 {
+            SetWindowLongPtrW(hwnd,GWL_EXSTYLE,ex|WS_EX_LAYERED.0 as isize);
+        }
+        // 分层窗口必须选一种合成方式，否则画面完全不出；常亮 255 保留逐像素 alpha。
+        SetLayeredWindowAttributes(hwnd,COLORREF(0),255,LWA_ALPHA)
+    }
+}
+
 // 图形上下文和原生样式就绪后重新启用逐像素合成；不能只依赖创建 HWND 时的请求。
 fn enable_alpha_composition(hwnd:HWND)->windows::core::Result<()> {
     use windows::Win32::Graphics::Dwm::{DwmEnableBlurBehindWindow,DWM_BLURBEHIND,DWM_BB_ENABLE,DWM_BB_BLURREGION};
@@ -94,6 +109,7 @@ unsafe extern "system" fn subclass(
         || (msg==WM_SHOWWINDOW && wp.0!=0) {
         // 隐藏创建到首次显示、隐藏后恢复时也要恢复透明；等框架处理完窗口状态再应用。
         let result=DefSubclassProc(hwnd,msg,wp,lp);
+        let _=enable_layered(hwnd);
         let _=enable_alpha_composition(hwnd);
         return result;
     }
@@ -166,7 +182,8 @@ unsafe fn apply_style(hwnd: HWND, editing: bool, raise: bool) {
     // APPWINDOW；ACCEPTFILES（winit 默认）也去掉，拖放走的是 OLE RegisterDragDrop，
     // 不依赖 WM_DROPFILES，这样 ex style 就是 0x08000088。
     // 置顶由 SetWindowPos 管理，避免样式标记与实际窗口层级脱节。
-    let mut want_ex = (ex | WS_EX_TOOLWINDOW.0 as isize)
+    // LAYERED 必须常驻：这是逐像素透明的开关，每帧兜底时不能把它抹掉。
+    let mut want_ex = (ex | WS_EX_TOOLWINDOW.0 as isize | WS_EX_LAYERED.0 as isize)
         & !(WS_EX_APPWINDOW.0 as isize)
         & !(WS_EX_ACCEPTFILES.0 as isize);
     if editing {
@@ -210,6 +227,8 @@ impl Window {
         let RawWindowHandle::Win32(handle) = cc.window_handle().ok()?.as_raw() else { return None };
         let hwnd = HWND(handle.hwnd.get() as *mut _);
         let hook = unsafe {
+            // 顺序要紧：先挂 LAYERED 再进入 eframe 的首帧显示流程。
+            let _=enable_layered(hwnd);
             apply_style(hwnd, false, false);
             let _=enable_alpha_composition(hwnd);
             let _ = SetWindowSubclass(hwnd, Some(subclass), SUBCLASS_ID, 0);
