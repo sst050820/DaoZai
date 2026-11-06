@@ -1019,8 +1019,11 @@ mod service {
         let max = uids.last().copied().unwrap_or(0);
         let tail: Vec<u32> = uids.iter().rev().take(20).rev().copied().collect();
         for uid in tail {
-            if let Ok(Some(item))=super::fetch::item(session,uid,account){
-                let _=ev.send(Event::Mail{item,new:false});
+            match super::fetch::item(session,uid,account){
+                Ok(Some(item))=>{let _=ev.send(Event::Mail{item,new:false});},
+                Ok(None)=>{},
+                // 连接已失步：停止使用这条连接，后面的命令会失败并触发重连。
+                Err(())=>break,
             }
         }
         Ok(max)

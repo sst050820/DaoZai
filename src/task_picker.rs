@@ -8,6 +8,8 @@ pub(crate) enum PickerAction { Save, Skip, Cancel }
 pub(crate) struct ReminderPicker {
     pub open:bool,
     pub focus:bool,
+    /// 每周重复的待办：只看时间，允许选今天已过去的时刻；左侧说明文字。
+    pub repeat_note:Option<String>,
     origin:NaiveDate,
     positions:[i64;3],
     wheel:[f32;3],
@@ -19,7 +21,7 @@ impl ReminderPicker {
     pub fn new(due:Option<&str>)->Self {
         let selected=due.and_then(|text|NaiveDateTime::parse_from_str(text,"%Y-%m-%d %H:%M").ok())
             .unwrap_or_else(||(Local::now()+Duration::minutes(15)).naive_local());
-        Self{open:false,focus:false,origin:selected.date(),positions:[0,selected.hour() as i64,selected.minute() as i64],wheel:[0.0;3],drag:[0.0;3],wheel_at:[0.0;3],error:String::new()}
+        Self{open:false,focus:false,repeat_note:None,origin:selected.date(),positions:[0,selected.hour() as i64,selected.minute() as i64],wheel:[0.0;3],drag:[0.0;3],wheel_at:[0.0;3],error:String::new()}
     }
     pub fn show(&mut self){self.open=true;self.focus=true;}
     fn selected(&self)->NaiveDateTime {
@@ -86,7 +88,10 @@ impl ReminderPicker {
                 clipped.centered_text(x+width/2.0,77.0+distance*18.0,&self.label(column,value),size,if strength>0.7{W::Semibold}else{W::Regular},color,H::Center);
             }
         }
-        c.text(42.0,79.0,if self.error.is_empty(){"已完成"}else{&self.error},9.0,W::Regular,if self.error.is_empty(){theme::GRAY}else{theme::RED},H::Left);
+        let note=self.repeat_note.as_deref();
+        let (label,color)=if !self.error.is_empty(){(self.error.as_str(),theme::RED)}else if let Some(note)=note.filter(|n|!n.is_empty()){(note,theme::BLUE)}else{("已完成",theme::GRAY)};
+        let w=c.text(42.0,79.0,label,9.0,W::Regular,color,H::Left);
+        if self.error.is_empty() && note==Some(""){c.text(42.0+w+4.0,79.0,"· 下方可设每周重复",9.0,W::Regular,theme::DIM,H::Left);}
         let (skip,b)=capsule(c,41.0,105.0,100.0,22.0,"task-reminder-skip",theme::BTN,theme::BTN_HOVER);
         b.centered_text(91.0,116.0,if has_reminder{"取消提醒"}else{"暂不提醒"},10.0,W::Regular,theme::GRAY,H::Center);
         if skip.clicked(){return Some(PickerAction::Skip);}
@@ -95,7 +100,7 @@ impl ReminderPicker {
         let (save,b)=capsule(c,307.0,108.0,63.0,20.0,"task-reminder-save",Color32::from_rgb(10,132,255),Color32::from_rgb(35,150,255));
         b.centered_text(338.5,118.0,"完成",10.0,W::Semibold,theme::WHITE,H::Center);
         if save.clicked(){
-            if self.selected()<=Local::now().naive_local(){self.error="请选择晚于当前的时间".into();}
+            if self.repeat_note.as_deref().is_none_or(str::is_empty) && self.selected()<=Local::now().naive_local(){self.error="请选择晚于当前的时间".into();}
             else{return Some(PickerAction::Save);}
         }
         None

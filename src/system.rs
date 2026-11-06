@@ -1,5 +1,6 @@
 //! Windows 状态采样与经用户授权的通知读取。
-use std::collections::HashSet;
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::mpsc::{self, Receiver};
 use windows::core::{Result, HSTRING, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, HWND, RECT};
@@ -222,12 +223,27 @@ pub(crate) fn is_browser_process(name:&str)->bool {
         .iter().any(|browser|name.eq_ignore_ascii_case(browser))
 }
 
-fn browser_overlaps_island(browser:RECT,island:RECT)->bool {
-    let scale=(island.right-island.left) as f32/crate::app::WIN_W;
-    let center=(island.left+island.right) as f32/2.0;
+fn browser_overlaps_island(browser:RECT,island:RECT,dock:crate::model::Dock)->bool {
+    if dock.is_side() {return window_covers_side(browser,island,dock);}
+    // 窗口是 CANVAS_W 宽的透明画布，岛体中心固定在画布左侧 WIN_W/2 处（与水平位置、大小无关）。
+    let scale=(island.right-island.left) as f32/crate::app::CANVAS_W;
+    let center=island.left as f32+crate::app::WIN_W*scale/2.0;
     let half=crate::app::PW*scale/2.0;
     (browser.left as f32)<center+half && (browser.right as f32)>center-half
         && (browser.top as f32)<island.top as f32+crate::app::BAR_H*scale && browser.bottom>island.top
+}
+
+/// 左右停靠：画布是 SIDE_W × SIDE_H，岛体贴在画布的左 / 右边、竖直居中。
+/// 前台窗口盖住岛所在的那一段屏幕边缘（例如最大化、全屏或贴边摆放）即视为遮挡。
+fn window_covers_side(window:RECT,island:RECT,dock:crate::model::Dock)->bool {
+    let scale=(island.right-island.left) as f32/crate::side_dock::SIDE_W;
+    let cy=island.top as f32+crate::side_dock::SIDE_H*scale/2.0;
+    let half=crate::app::PH*scale/2.0;
+    let strip=crate::side_dock::SIDE_BAR_W*scale;
+    let vertical=(window.top as f32)<cy+half && (window.bottom as f32)>cy-half;
+    let horizontal=if dock==crate::model::Dock::Left {(window.left as f32)<island.left as f32+strip && window.right>island.left}
+        else {(window.right as f32)>island.right as f32-strip && window.left<island.right};
+    vertical && horizontal
 }
 
 pub fn browser_at_top(island:HWND,settings:&crate::model::Settings)->Option<bool> {
@@ -240,7 +256,7 @@ pub fn browser_at_top(island:HWND,settings:&crate::model::Settings)->Option<bool
         if pid==0 || pid==GetCurrentProcessId(){return None;}
         let mut browser_rect=RECT::default();let mut island_rect=RECT::default();
         if GetWindowRect(foreground,&mut browser_rect).is_err() || GetWindowRect(island,&mut island_rect).is_err(){return None;}
-        if !browser_overlaps_island(browser_rect,island_rect){return Some(false);}
+        if !browser_overlaps_island(browser_rect,island_rect,settings.dock){return Some(false);}
         let Ok(process)=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,false,pid) else{return Some(false)};
         let mut path=[0u16;1024];let mut length=path.len() as u32;
         let result=QueryFullProcessImageNameW(process,PROCESS_NAME_WIN32,PWSTR(path.as_mut_ptr()),&mut length);
@@ -256,104 +272,149 @@ pub enum Incoming {
     Status(String),
     Message(String, String, String),
 }
-fn notification_text(n: &UserNotification) -> Result<(String, String, String)> {
-    let app = n
-        .AppInfo()
-        .and_then(|a| a.DisplayInfo())
-        .and_then(|d| d.DisplayName())
-        .map(|s| s.to_string())
-        .unwrap_or_default();
-    let app = if app.trim().is_empty() {
-        "Windows 通知".to_string()
-    } else {
-        app
-    };
-    let id=n.AppInfo().and_then(|a|a.AppUserModelId()).map(|s|s.to_string()).unwrap_or_else(|_|app.clone());
+#[path="qq_toast_source.rs"]
+mod qq_toast_source;
+
+fn notification_identity(n:&UserNotification, number:u32, created:i64, known_qq:bool)->(String,String){
+    if known_qq{return ("QQ".into(),"QQ".into());}
+    let info=n.AppInfo().ok();
+    let id=info.as_ref().and_then(|app|app.AppUserModelId().ok()).map(|id|id.to_string()).unwrap_or_default();
+    if id.eq_ignore_ascii_case("QQ") || (id.is_empty() && qq_toast_source::matches(number,created)){
+        return ("QQ".into(),"QQ".into());
+    }
+    let name=info.and_then(|app|app.DisplayInfo().ok()).and_then(|display|display.DisplayName().ok())
+        .map(|name|name.to_string()).filter(|name|!name.trim().is_empty()).unwrap_or_else(||"Windows 通知".into());
+    let id=if id.is_empty(){name.clone()}else{id};
+    (name,id)
+}
+fn notification_body(n: &UserNotification) -> Result<String> {
     let binding = n
         .Notification()?
         .Visual()?
         .GetBinding(&HSTRING::from("ToastGeneric"))?;
     let texts = binding.GetTextElements()?;
     let mut parts = vec![];
-    for i in 0..texts.Size()? {
-        parts.push(texts.GetAt(i)?.Text()?.to_string());
+    for i in 0..texts.Size()?.min(8) {
+        parts.push(texts.GetAt(i)?.Text()?.to_string().chars().take(300).collect::<String>());
     }
-    Ok((app, id, parts.join(" · ")))
+    Ok(parts.join(" · "))
 }
-/// 必须由窗口线程发起权限请求，后台线程仅等待并读取新增通知。
-pub fn connect() -> Result<Receiver<Incoming>> {
+fn is_wechat_toast(app:&str,id:&str)->bool{
+    ["微信","WeChat","Weixin"].iter().any(|name|app.trim().eq_ignore_ascii_case(name))
+        || ["WeChat","Weixin","Tencent.WeChat","Tencent.Weixin"].iter().any(|name|id.eq_ignore_ascii_case(name))
+}
+/// 停止信号独立于消息队列，断开后结束等待，不再读取通知。
+pub struct Notifications {
+    incoming: Receiver<Incoming>,
+    stop: mpsc::Sender<()>,
+}
+impl Notifications {
+    pub fn try_recv(&self)->std::result::Result<Incoming,mpsc::TryRecvError>{self.incoming.try_recv()}
+}
+impl Drop for Notifications {fn drop(&mut self){let _=self.stop.send(());}}
+
+#[derive(Clone,Copy,PartialEq,Eq)]
+struct ToastVersion { created:i64, qq_body:Option<u64> }
+impl ToastVersion {
+    fn new(created:i64,qq_body:Option<&str>)->Self{
+        Self{created,qq_body:qq_body.map(|body|{let mut hash=std::collections::hash_map::DefaultHasher::new();body.hash(&mut hash);hash.finish()})}
+    }
+}
+#[derive(Default)]
+struct NotificationBaseline { previous: Option<HashMap<u32,ToastVersion>> }
+impl NotificationBaseline {
+    fn unchanged_other(&self,id:u32,created:i64)->Option<ToastVersion>{
+        self.previous.as_ref()?.get(&id).copied().filter(|old|old.created==created && old.qq_body.is_none())
+    }
+    fn changed(&self,id:u32,version:ToastVersion)->bool{
+        self.previous.as_ref().is_some_and(|old|old.get(&id)!=Some(&version))
+    }
+}
+
+fn qq_channel_status()->String{
+    use windows::UI::Notifications::{NotificationSetting,ToastNotificationManager};
+    match ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from("QQ")).and_then(|notifier|notifier.Setting()){
+        Ok(NotificationSetting::Enabled)=>"QQ 系统通知通道可用".into(),
+        Ok(NotificationSetting::DisabledForApplication)=>"QQ 系统通知已关闭，请在 Windows 通知设置中开启后重新连接".into(),
+        Ok(NotificationSetting::DisabledForUser)=>"Windows 系统通知已关闭，请开启后重新连接".into(),
+        Ok(NotificationSetting::DisabledByGroupPolicy)=>"系统策略禁止通知".into(),
+        _=>"QQ 系统通知通道未就绪，请检查 QQ 安装和通知设置后重新连接".into(),
+    }
+}
+
+/// 必须由窗口线程发起权限请求，后台仅读取新增或更新的通知。
+pub fn connect(ctx:eframe::egui::Context,qq_only:bool) -> Result<Notifications> {
     let listener = UserNotificationListener::Current()?;
     let request = listener.RequestAccessAsync()?;
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
+    let (tx, rx) = mpsc::sync_channel(32);
+    let (stop, stopped)=mpsc::channel();
+    std::thread::Builder::new().name("daozai-notifications".into()).spawn(move || {
+        let send=|event|{
+            let result=tx.send(event);
+            if result.is_ok(){ctx.request_repaint();}
+            result.is_ok()
+        };
         let run = || -> Result<()> {
-            let _ = unsafe {
-                windows::Win32::System::WinRT::RoInitialize(
-                    windows::Win32::System::WinRT::RO_INIT_MULTITHREADED,
-                )
-            };
+            unsafe {windows::Win32::System::WinRT::RoInitialize(windows::Win32::System::WinRT::RO_INIT_MULTITHREADED)}?;
+            struct Apartment;
+            impl Drop for Apartment {fn drop(&mut self){unsafe{windows::Win32::System::WinRT::RoUninitialize();}}}
+            let _apartment=Apartment;
             if request.get()? != UserNotificationListenerAccessStatus::Allowed {
-                let _ = tx.send(Incoming::Revoked);
-                let _ = tx.send(Incoming::Status(
-                    "Windows 未授予通知读取权限，可在系统设置中调整。".into(),
-                ));
+                send(Incoming::Revoked);
+                send(Incoming::Status("Windows 未授予通知读取权限，可在系统设置中调整。".into()));
                 return Ok(());
             }
             let listener = UserNotificationListener::Current()?;
-            let mut seen = HashSet::new();
-            let mut first = true;
+            let qq_status=qq_channel_status();
+            let mut baseline=NotificationBaseline::default();
+            let mut last_status=String::new();
             loop {
+                if stopped.try_recv()!=Err(mpsc::TryRecvError::Empty){return Ok(());}
                 if listener.GetAccessStatus()? != UserNotificationListenerAccessStatus::Allowed {
-                    let _ = tx.send(Incoming::Revoked);
-                    let _ = tx.send(Incoming::Status("通知权限已被关闭".into()));
+                    send(Incoming::Revoked);
+                    send(Incoming::Status("通知权限已被关闭".into()));
                     return Ok(());
                 }
-                let items = listener
-                    .GetNotificationsAsync(NotificationKinds::Toast)?
-                    .get()?;
-                let mut current = HashSet::new();
+                let items=listener.GetNotificationsAsync(NotificationKinds::Toast)?.get()?;
+                let mut current=HashMap::new();
+                let mut messages=Vec::new();
                 for i in 0..items.Size()? {
-                    let n = items.GetAt(i)?;
-                    let id = n.Id()?;
-                    current.insert(id);
-                    if !first && !seen.contains(&id) {
-                        if let Ok((app, id, body)) = notification_text(&n) {
-                            if !body.is_empty() {
-                                if tx.send(Incoming::Message(app, id, body)).is_err() {
-                                    return Ok(());
-                                }
-                            }
-                        }
+                    let Ok(n)=items.GetAt(i) else{continue};
+                    let (Ok(number),Ok(created))=(n.Id(),n.CreationTime()) else{continue};
+                    let created=created.UniversalTime;
+                    if let Some(old)=baseline.unchanged_other(number,created){current.insert(number,old);continue;}
+                    let known_qq=baseline.previous.as_ref().and_then(|old|old.get(&number)).is_some_and(|old|old.created==created && old.qq_body.is_some());
+                    let (app,id)=notification_identity(&n,number,created,known_qq);
+                    // 微信只走任务栏事件，即使客户端同时发送系统通知也不读取其正文。
+                    if (qq_only && id!="QQ") || is_wechat_toast(&app,&id){current.insert(number,ToastVersion::new(created,None));continue;}
+                    let qq=id=="QQ";
+                    // QQ 可能原地更新同一条通知；其他应用的启动历史不需要读取正文。
+                    let body=if qq || baseline.previous.is_some(){notification_body(&n).unwrap_or_default()}else{String::new()};
+                    let version=ToastVersion::new(created,qq.then_some(body.as_str()));
+                    current.insert(number,version);
+                    if baseline.changed(number,version){
+                        let body=if qq && body.trim().is_empty(){"有新消息".into()}else{body};
+                        if !body.trim().is_empty(){messages.push((created,app,id,body));}
                     }
                 }
-                if first {
-                    let _ = tx.send(Incoming::Status(format!(
-                        "Windows 已授权 · 当前可见 {} 条通知",
-                        items.Size()?
-                    )));
-                    first = false;
+                baseline.previous=Some(current);
+                messages.sort_by_key(|item|item.0);
+                for (_,app,id,body) in messages {
+                    if !send(Incoming::Message(app,id,body)){return Ok(());}
                 }
-                seen = current;
-                std::thread::sleep(std::time::Duration::from_secs(2));
-                if tx
-                    .send(Incoming::Status(format!(
-                        "正在监听 · 当前可见 {} 条通知",
-                        seen.len()
-                    )))
-                    .is_err()
-                {
-                    return Ok(());
+                let status=if qq_only{format!("仅监听 QQ · {qq_status}")}else{format!("正在监听 Windows 通知 · 当前可见 {} 条\n{qq_status}",items.Size()?)};
+                if status!=last_status {
+                    if !send(Incoming::Status(status.clone())){return Ok(());}
+                    last_status=status;
                 }
+                if stopped.recv_timeout(std::time::Duration::from_secs(1))!=Err(mpsc::RecvTimeoutError::Timeout){return Ok(());}
             }
         };
         if let Err(e) = run() {
-            let _ = tx.send(Incoming::Status(format!(
-                "Windows 暂不允许读取通知：{}。此功能可能需要打包应用身份。",
-                e.code()
-            )));
+            send(Incoming::Status(format!("Windows 暂不允许读取通知：{}。请检查通知访问权限与应用身份。",e.code())));
         }
-    });
-    Ok(rx)
+    }).map_err(|_|windows::core::Error::from_win32())?;
+    Ok(Notifications{incoming:rx,stop})
 }
 
 pub fn pick_files() -> Result<Vec<std::path::PathBuf>> {
@@ -426,6 +487,26 @@ pub fn drag_file(path: &std::path::Path) -> Result<()> {
 mod tests {
     use super::*;
     #[test]
+    fn notifications_skip_history_but_detect_reused_ids_and_updated_content(){
+        let mut baseline=NotificationBaseline::default();
+        let first=ToastVersion::new(10,Some("第一条"));
+        assert!(!baseline.changed(1,first));
+        baseline.previous=Some(HashMap::from([(1,first),(2,ToastVersion::new(10,None))]));
+        assert!(!baseline.changed(1,first));
+        assert!(baseline.changed(1,ToastVersion::new(10,Some("第二条"))));
+        assert!(baseline.changed(1,ToastVersion::new(11,Some("第一条"))));
+        assert!(baseline.unchanged_other(2,10).is_some());
+        assert!(baseline.unchanged_other(1,10).is_none());
+        assert!(baseline.unchanged_other(2,11).is_none());
+        baseline.previous=Some(HashMap::new());assert!(baseline.changed(1,first));
+    }
+    #[test]
+    fn notifications_disconnect_signals_stop_without_waiting_for_new_messages(){
+        let (_tx,incoming)=mpsc::sync_channel(32);let (stop,stopped)=mpsc::channel();
+        drop(Notifications{incoming,stop});
+        assert_eq!(stopped.try_recv(),Ok(()));
+    }
+    #[test]
     fn browser_minimal_recognizes_browsers_without_matching_electron_apps(){
         for name in ["chrome.exe","MSEDGE.EXE","firefox.exe","brave.exe","zen.exe","QQBrowser.exe","quark.exe","Quark.exe","QUARK.EXE"] {
             assert!(is_browser_process(name),"应识别浏览器 {name}");
@@ -438,11 +519,26 @@ mod tests {
     fn browser_minimal_checks_the_actual_top_overlap_on_the_island_monitor(){
         let island=RECT{left:560,top:0,right:1360,bottom:238};
         for browser in [RECT{left:0,top:-8,right:1920,bottom:1200},RECT{left:0,top:0,right:960,bottom:1150},RECT{left:700,top:10,right:1500,bottom:800}] {
-            assert!(browser_overlaps_island(browser,island));
+            assert!(browser_overlaps_island(browser,island,crate::model::Dock::Top));
         }
         for browser in [RECT{left:100,top:150,right:1700,bottom:1100},RECT{left:1920,top:0,right:3840,bottom:1200},RECT{left:0,top:0,right:600,bottom:1000},RECT{left:0,top:-1200,right:1920,bottom:0}] {
-            assert!(!browser_overlaps_island(browser,island));
+            assert!(!browser_overlaps_island(browser,island,crate::model::Dock::Top));
         }
+    }
+    #[test]
+    fn side_dock_avoidance_checks_the_covered_screen_edge(){
+        use crate::model::Dock;
+        // 1920×1080 屏幕，100% 缩放：左侧画布 0..500，竖直居中（240..840），岛体中心 y=540。
+        let left=RECT{left:0,top:240,right:500,bottom:840};
+        let right=RECT{left:1420,top:240,right:1920,bottom:840};
+        let maximized=RECT{left:-8,top:-8,right:1928,bottom:1048};
+        assert!(browser_overlaps_island(maximized,left,Dock::Left) && browser_overlaps_island(maximized,right,Dock::Right));
+        let left_half=RECT{left:0,top:0,right:960,bottom:1040};
+        assert!(browser_overlaps_island(left_half,left,Dock::Left) && !browser_overlaps_island(left_half,right,Dock::Right),"贴左半屏只遮住左侧");
+        let floating=RECT{left:300,top:100,right:1600,bottom:900};
+        assert!(!browser_overlaps_island(floating,left,Dock::Left) && !browser_overlaps_island(floating,right,Dock::Right),"没碰到边缘的窗口不避让");
+        let top_strip=RECT{left:0,top:0,right:1920,bottom:300};
+        assert!(!browser_overlaps_island(top_strip,left,Dock::Left),"没盖到岛所在的那一段边缘");
     }
     #[test]
     fn network_connection_uses_connected_wording() {

@@ -243,7 +243,8 @@ impl<'app> WgpuWinitApp<'app> {
             event_loop,
             Some(window.scale_factor() as f32),
             event_loop.system_theme(),
-            painter.max_texture_side(),
+            // 与 glow 后端一致：字体图集最宽 2048，CPU 端与显卡端各自封顶 16MB。
+            painter.max_texture_side().map(|side| side.min(2048)),
         );
 
         #[cfg(feature = "accesskit")]
@@ -609,6 +610,9 @@ impl WgpuWinitRunning<'_> {
                 .iter()
                 .map(|(id, viewport)| (*id, viewport.info.clone()))
                 .collect();
+            if viewport_id == ViewportId::ROOT {
+                crate::scale_root_input(&mut raw_input, crate::root_viewport_scale());
+            }
 
             painter.handle_screenshots(&mut raw_input.events);
 
@@ -634,7 +638,7 @@ impl WgpuWinitRunning<'_> {
         } = &mut *shared_mut;
 
         let FullOutput {
-            platform_output,
+            mut platform_output,
             textures_delta,
             shapes,
             pixels_per_point,
@@ -658,6 +662,9 @@ impl WgpuWinitRunning<'_> {
             return Ok(EventResult::Wait);
         };
 
+        if viewport_id == ViewportId::ROOT {
+            crate::scale_root_output(&mut platform_output, crate::root_viewport_scale());
+        }
         egui_winit.handle_platform_output(window, platform_output);
 
         let clipped_primitives = egui_ctx.tessellate(shapes, pixels_per_point);
@@ -673,7 +680,7 @@ impl WgpuWinitRunning<'_> {
         });
         let vsync_secs = painter.paint_and_update_textures(
             viewport_id,
-            pixels_per_point,
+            pixels_per_point * if viewport_id==ViewportId::ROOT {crate::root_frame_paint_scale()} else {1.0},
             app.clear_color(&egui_ctx.style().visuals),
             &clipped_primitives,
             &textures_delta,
@@ -884,7 +891,7 @@ impl Viewport {
                     event_loop,
                     Some(window.scale_factor() as f32),
                     event_loop.system_theme(),
-                    painter.max_texture_side(),
+                    painter.max_texture_side().map(|side| side.min(2048)),
                 ));
 
                 egui_winit::update_viewport_info(&mut self.info, egui_ctx, &window, true);

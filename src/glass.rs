@@ -113,9 +113,87 @@ pub fn rim_alpha() -> f32 {
     RIM_STRENGTH * RIM_FACING_MIN
 }
 
+/// 毛玻璃皮肤的着色量（叠在系统模糊之上的深色玻璃底，0..1）。
+///
+/// - 开启系统模糊：背景已被抹平，按对比度刚好够白字 4.8:1 即可，再留 0.03 余量
+///   应对采样点之外的亮斑；最浅 0.20，深色桌面上尽量通透。
+/// - 没有模糊：背后细节仍然清楚，需要更深的烟熏（不低于 0.62）才压得住纹理。
+/// - 还没有采样结果时按中等亮度背景估计，宁可略深也不让文字发虚。
+pub fn glass_tint(backdrop: Option<[f32; 3]>, blurred: bool) -> f32 {
+    // 按真实的玻璃底色（不是纯黑）计算，白字刚好达到目标对比度。
+    let ground = [GROUND_DARK.0 as f32 / 255.0, GROUND_DARK.1 as f32 / 255.0, GROUND_DARK.2 as f32 / 255.0];
+    let need = tint_for_contrast(backdrop.unwrap_or([0.6; 3]), [1.0; 3], ground, 0.0, 0.95, TEXT_CONTRAST);
+    if blurred {
+        (need + 0.03).clamp(0.20, 0.95)
+    } else {
+        (need + 0.20).clamp(SMOKED_OPACITY - 0.20, 0.90)
+    }
+}
+
+/// 浅色毛玻璃的着色量（叠在模糊之上的白色玻璃底，0..1），让深色文字达到 4.8:1。
+/// 深色背景对深色文字最不利，所以没有采样时按偏暗的背景估计。
+pub fn light_tint(backdrop: Option<[f32; 3]>, blurred: bool) -> f32 {
+    let ink = [22.0 / 255.0, 22.0 / 255.0, 26.0 / 255.0];
+    let need = tint_for_contrast(backdrop.unwrap_or([0.35; 3]), ink, LIGHT_GROUND, 0.0, 0.95, TEXT_CONTRAST);
+    if blurred { (need + 0.03).clamp(0.12, 0.95) } else { (need + 0.20).clamp(0.72, 0.96) }
+}
+
+/// 浅色玻璃的底色。
+pub const LIGHT_GROUND: [f32; 3] = [248.0 / 255.0, 248.0 / 255.0, 250.0 / 255.0];
+
+/// 把岛体四周的若干屏幕采样合成一个「背景色」：取平均色与最亮样本的中点，
+/// 偏向亮处，因为白字最怕的是亮背景。
+pub fn backdrop_estimate(samples: &[[f32; 3]]) -> Option<[f32; 3]> {
+    if samples.is_empty() {
+        return None;
+    }
+    let n = samples.len() as f32;
+    let mean = samples.iter().fold([0.0f32; 3], |a, c| [a[0] + c[0] / n, a[1] + c[1] / n, a[2] + c[2] / n]);
+    let bright = samples
+        .iter()
+        .copied()
+        .max_by(|a, b| rel_luminance(*a).total_cmp(&rel_luminance(*b)))?;
+    Some(mix3(mean, bright, 0.5))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn glass_tint_keeps_white_text_readable_on_any_backdrop() {
+        for b in [[1.0; 3], [0.95, 0.9, 0.7], [0.5; 3], [0.05; 3]] {
+            for blurred in [true, false] {
+                let t = glass_tint(Some(b), blurred);
+                let ground = [GROUND_DARK.0 as f32 / 255.0, GROUND_DARK.1 as f32 / 255.0, GROUND_DARK.2 as f32 / 255.0];
+                assert!(contrast(mix3(b, ground, t), [1.0; 3]) >= 4.5, "{b:?} {blurred} {t}");
+            }
+        }
+        // 深色背景更通透，浅色背景更深；无模糊始终比有模糊更深
+        assert!(glass_tint(Some([0.05; 3]), true) < glass_tint(Some([1.0; 3]), true));
+        assert!(glass_tint(Some([0.05; 3]), false) > glass_tint(Some([0.05; 3]), true));
+        assert!(glass_tint(None, true) >= 0.20);
+    }
+
+    #[test]
+    fn light_glass_keeps_dark_text_readable() {
+        let ink = [22.0 / 255.0, 22.0 / 255.0, 26.0 / 255.0];
+        for b in [[0.0; 3], [0.1, 0.2, 0.5], [0.5; 3], [1.0; 3]] {
+            for blurred in [true, false] {
+                let t = light_tint(Some(b), blurred);
+                assert!(contrast(mix3(b, LIGHT_GROUND, t), ink) >= 4.5, "{b:?} {blurred} {t}");
+            }
+        }
+        assert!(light_tint(Some([1.0; 3]), true) < light_tint(Some([0.0; 3]), true), "亮背景更通透");
+    }
+
+    #[test]
+    fn backdrop_estimate_leans_toward_bright_samples() {
+        assert_eq!(backdrop_estimate(&[]), None);
+        let e = backdrop_estimate(&[[0.0; 3], [0.0; 3], [0.0; 3], [1.0; 3]]).unwrap();
+        assert!((e[0] - 0.625).abs() < 1e-5, "{e:?}");
+        assert_eq!(backdrop_estimate(&[[0.2, 0.4, 0.6]]), Some([0.2, 0.4, 0.6]));
+    }
 
     #[test]
     fn contrast_matches_wcag() {

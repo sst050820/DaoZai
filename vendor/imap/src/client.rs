@@ -141,6 +141,12 @@ pub struct Connection<T: Read + Write> {
 
     /// Tracks if we have read a greeting.
     pub greeting_read: bool,
+
+    /// 岛仔补丁：一条响应没能完整读完（解析失败、标签错位、读写中断）后，流里残留的数据
+    /// 会和下一条命令的响应错位。原版此时在下一次读取时 `assert_eq!` 标签而 panic，发布版
+    /// `panic = "abort"` 会直接结束整个程序。这里改为标记连接已失步，之后的命令一律返回
+    /// `ConnectionLost`，由调用方重新连接。
+    desynced: bool,
 }
 
 // `Deref` instances are so we can make use of the same underlying primitives in `Client` and
@@ -330,6 +336,7 @@ impl<T: Read + Write> Client<T> {
                 tag: INITIAL_TAG,
                 debug: false,
                 greeting_read: false,
+                desynced: false,
             },
         }
     }
@@ -1323,8 +1330,15 @@ impl<T: Read + Write> Connection<T> {
     }
 
     fn run_command(&mut self, untagged_command: &str) -> Result<()> {
+        if self.desynced {
+            return Err(Error::ConnectionLost);
+        }
         let command = self.create_command(untagged_command);
-        self.write_line(command.into_bytes().as_slice())
+        let result = self.write_line(command.into_bytes().as_slice());
+        if result.is_err() {
+            self.desynced = true;
+        }
+        result
     }
 
     fn run_command_and_read_response(&mut self, untagged_command: &str) -> Result<Vec<u8>> {
@@ -1339,6 +1353,18 @@ impl<T: Read + Write> Connection<T> {
     }
 
     pub(crate) fn read_response_onto(&mut self, data: &mut Vec<u8>) -> Result<()> {
+        if self.desynced {
+            return Err(Error::ConnectionLost);
+        }
+        let result = self.read_response_onto_inner(data);
+        // 只有服务器明确以 OK / NO / BAD 结束本条命令时，流才保持同步。
+        if matches!(result, Err(ref e) if !matches!(e, Error::No(_) | Error::Bad(_))) {
+            self.desynced = true;
+        }
+        result
+    }
+
+    fn read_response_onto_inner(&mut self, data: &mut Vec<u8>) -> Result<()> {
         let mut continue_from = None;
         let mut try_first = !data.is_empty();
         let match_tag = format!("{}{}", TAG_PREFIX, self.tag);
@@ -1366,7 +1392,14 @@ impl<T: Read + Write> Connection<T> {
                             ..
                         },
                     )) => {
-                        assert_eq!(tag.as_bytes(), match_tag.as_bytes());
+                        if tag.as_bytes() != match_tag.as_bytes() {
+                            // 上一条命令迟到的结束行，或服务器回错了标签：不能再信任这条连接。
+                            return Err(Error::Parse(ParseError::Unexpected(format!(
+                                "response tag {} does not match {}",
+                                String::from_utf8_lossy(tag.as_bytes()),
+                                match_tag
+                            ))));
+                        }
                         Some(match status {
                             Status::Bad | Status::No => {
                                 Err((status, information.map(ToString::to_string)))
@@ -1453,6 +1486,31 @@ mod tests {
         ($s:expr) => {
             Session::new(Client::new($s).conn)
         };
+    }
+
+    #[test]
+    fn mismatched_tag_marks_connection_lost_instead_of_panicking() {
+        // a2 的响应里先来了 a1 迟到的结束行：原版在这里 assert panic。
+        let mock_stream = MockStream::new(b"a1 OK late\r\na2 OK noop\r\n".to_vec());
+        let mut client = Client::new(mock_stream);
+        client.tag = 1;
+        assert!(client.run_command_and_check_ok("NOOP").is_err());
+        match client.run_command_and_check_ok("NOOP") {
+            Err(Error::ConnectionLost) => {}
+            other => panic!("失步后的命令应返回 ConnectionLost：{:?}", other.err()),
+        }
+    }
+
+    #[test]
+    fn unparseable_response_poisons_and_no_bad_do_not() {
+        let mock_stream = MockStream::new(b"a1 NO nope\r\na2 OK fine\r\n".to_vec());
+        let mut client = Client::new(mock_stream);
+        assert!(matches!(client.run_command_and_check_ok("NOOP"), Err(Error::No(_))));
+        assert!(client.run_command_and_check_ok("NOOP").is_ok(), "NO 是正常结束，连接仍可用");
+        let mock_stream = MockStream::new(b"a1 PREAUTH what\r\na2 OK fine\r\n".to_vec());
+        let mut client = Client::new(mock_stream);
+        assert!(client.run_command_and_check_ok("NOOP").is_err());
+        assert!(matches!(client.run_command_and_check_ok("NOOP"), Err(Error::ConnectionLost)));
     }
 
     #[test]

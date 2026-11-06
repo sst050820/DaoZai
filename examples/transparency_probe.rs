@@ -12,7 +12,7 @@ fn main()->eframe::Result<()> {
             egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx,|ui|{
                 ui.painter().rect_filled(egui::Rect::from_min_max(egui::pos2(60.0,30.0),egui::pos2(260.0,130.0)),25.0,egui::Color32::BLACK);
             });
-            self.native.update((0.0,0.0,320.0,160.0),(60.0,30.0,200.0,100.0),None,None,ctx.pixels_per_point(),false,false);
+            self.native.update((0.0,0.0,320.0,160.0),(60.0,30.0,200.0,100.0),None,None,None,ctx.pixels_per_point(),false,false);
             // 隐藏创建的窗口首次显示时可能被系统重新定位，白色测试背景需跟随实际位置和层级。
             unsafe {
                 let mut rect=RECT::default();GetWindowRect(self.hwnd,&mut rect).unwrap();

@@ -1,6 +1,6 @@
 //! 只读酷狗本机 KRC，使用客户端原生时间戳，避免跨来源歌词偏移。
 use std::{fs,io::Read,path::{Path,PathBuf}};
-use super::{Lyrics,normalized,parse_krc};
+use super::{Lyrics,normalized,parse_krc,romanized,song_identity};
 
 const LIMIT:usize=2*1024*1024;
 // KRC 的固定替换表与 zlib 格式：https://gist.github.com/zengkid/68c455a860f29f215036be19171f0d6f
@@ -19,18 +19,33 @@ fn header<'a>(raw:&'a str,key:&str)->Option<&'a str>{
     raw.lines().find_map(|line|line.trim_start_matches('\u{feff}').strip_prefix(&prefix)?.strip_suffix(']')).map(str::trim)
 }
 
+/// 去掉标题末尾括号里的译名或别名：「ANGEL (天使)」→「ANGEL」。
+/// 括号里是版本信息（Live、Remix、伴奏、现场等）时保留，避免把其他版本的歌词当成原版。
+fn without_alias(title:&str)->&str {
+    static ALIAS:std::sync::OnceLock<regex::Regex>=std::sync::OnceLock::new();
+    static VERSION:std::sync::OnceLock<regex::Regex>=std::sync::OnceLock::new();
+    let alias=ALIAS.get_or_init(||regex::Regex::new(r"\s*[(（\[【]([^()（）\[\]【】]*)[)）\]】]\s*$").unwrap());
+    let version=VERSION.get_or_init(||regex::Regex::new(r"(?i)live|remix|mix|ver\b|version|edit|acoustic|inst|伴奏|现场|混音|版|demo|cover|翻唱|remaster|演唱会|\bdj\b").unwrap());
+    match alias.captures(title) {
+        Some(c) if !c[1].trim().is_empty() && !version.is_match(&c[1])=>title[..c.get(0).unwrap().start()].trim_end(),
+        _=>title,
+    }
+}
+
 fn select(raw:&str,title:&str,artist:&str,duration:f64)->Option<Lyrics>{
     let mut lyrics=parse_krc(raw);
     if !lyrics.synced{return None;}
     // 文件名已经严格匹配完整歌手与歌名；头部可能为空，合唱也可能只标主歌手。
-    if header(raw,"ti").filter(|s|!s.is_empty()).is_some_and(|s|normalized(s)!=normalized(title)) {
+    if header(raw,"ti").filter(|s|!s.is_empty()).is_some_and(|s|song_identity(s,artist).0!=song_identity(title,artist).0
+        && song_identity(without_alias(s),artist).0!=song_identity(without_alias(title),artist).0) {
         // 酷狗头部可能保留旧别名；仅在正文开头的完整歌名和歌手也吻合时接受。
         let credit=normalized(&format!("{title} - {artist}"));
         if !lyrics.lines.first().is_some_and(|line|line.t<=1.0 && normalized(&line.text)==credit){return None;}
     }
     if let Some(singer)=header(raw,"ar").filter(|s|!s.is_empty()) {
-        let singer=normalized(singer);
-        if singer!=normalized(artist) && !artist.split(['、','/','&',',','，',';','；']).any(|part|normalized(part)==singer){return None;}
+        let expected=song_identity(title,artist).1;
+        let singers=song_identity(header(raw,"ti").unwrap_or(title),singer).1;
+        if singers.is_empty() || !singers.iter().all(|s|expected.contains(s)){return None;}
     }
     if duration>0.0{
         if let Some(total)=header(raw,"total").and_then(|s|s.parse::<u32>().ok()){
@@ -54,20 +69,33 @@ fn directory_from_ini(bytes:&[u8])->Option<PathBuf>{
 }
 
 fn read_directory(root:&Path,title:&str,artist:&str,duration:f64)->Option<Lyrics>{
-    let prefix=normalized(&format!("{artist} - {title}"));
-    let suffix=regex::Regex::new(r"(?i)-[0-9a-f]{32}(?:-[0-9a-f]+){0,2}$").unwrap();
+    let identity=song_identity(title,artist);
+    if identity.1.is_empty(){return None;}
+    static SUFFIX:std::sync::OnceLock<regex::Regex>=std::sync::OnceLock::new();
+    let suffix=SUFFIX.get_or_init(||regex::Regex::new(r"(?i)-[0-9a-f]{32}(?:-[0-9a-f]+){0,2}$").unwrap());
     let mut files=fs::read_dir(root).ok()?.filter_map(Result::ok).filter_map(|entry|{
         let path=entry.path();
-        if !path.extension()?.eq_ignore_ascii_case("krc") || normalized(&suffix.replace(path.file_stem()?.to_str()?,""))!=prefix{return None;}
+        if !path.extension()?.eq_ignore_ascii_case("krc"){return None;}
+        let filename=suffix.replace(path.file_stem()?.to_str()?,"");
+        let (singer,name)=filename.split_once(" - ")?;
+        if song_identity(name,singer)!=identity{return None;}
         let meta=entry.metadata().ok()?;
-        (meta.is_file() && meta.len()<=LIMIT as u64).then_some((meta.modified().ok(),path))
+        (meta.is_file() && meta.len()<=LIMIT as u64).then_some((meta.modified().ok(),name.to_owned(),singer.to_owned(),path))
     }).collect::<Vec<_>>();
     files.sort_by(|a,b|b.0.cmp(&a.0));
-    for (_,path) in files{
-        let candidate=(||select(&decode(&fs::read(path).ok()?)?,title,artist,duration))();
-        if candidate.is_some(){return candidate;}
+    let mut fallback=None;
+    let mut transliterated=None;
+    for (_,name,singer,path) in files{
+        let raw=(||{let mut bytes=Vec::new();fs::File::open(path).ok()?.take(LIMIT as u64+1).read_to_end(&mut bytes).ok()?;decode(&bytes)})();
+        let Some(raw)=raw else{continue;};
+        let Some(candidate)=select(&raw,&name,&singer,duration) else{continue;};
+        // 同一首歌可能缓存过多份歌词：正文是罗马音的那份只作备选，优先用原文。
+        if romanized(title,&candidate) {if transliterated.is_none(){transliterated=Some(candidate);}continue;}
+        // 时长明确匹配的缓存优先；没有时长信息时才沿用最新的兼容缓存。
+        if duration<=0.0 || header(&raw,"total").and_then(|s|s.parse::<u32>().ok()).is_some_and(|total|total>0){return Some(candidate);}
+        if fallback.is_none(){fallback=Some(candidate);}
     }
-    None
+    fallback.or(transliterated)
 }
 
 pub fn read(title:&str,artist:&str,duration:f64)->Option<Lyrics>{
@@ -83,7 +111,47 @@ pub fn read(title:&str,artist:&str,duration:f64)->Option<Lyrics>{
 
 #[cfg(test)]
 mod tests{
+    #[test]
+    fn translated_alias_in_the_lyric_header_still_matches_but_versions_do_not(){
+        // 酷狗实际缓存：文件名为「尹美莱、Tiger JK、Bizzy - Angel」，头部标题带中文译名。
+        let krc=|ti:&str|format!("[ar:尹美莱/Tiger JK/Bizzy]\n[ti:{ti}]\n[total:0]\n[offset:0]\n[819,3016]<0,328,0>ANGEL (天使) - 尹美莱/Tiger JK/Bizzy\n[15670,1288]<0,205,0>You will always be my\n[20000,1500]<0,300,0>넌 나의 ANGEL");
+        assert!(select(&krc("ANGEL (天使)"),"Angel","尹美莱、Tiger JK、Bizzy",255.0).is_some(),"只多了译名的同一首歌应能读取");
+        assert!(select(&krc("ANGEL"),"Angel","尹美莱、Tiger JK、Bizzy",255.0).is_some());
+        for other in ["ANGEL (Live)","ANGEL (Remix)","ANGEL (伴奏)","ANGEL (现场版)","Devil (天使)"] {
+            assert!(select(&krc(other),"Angel","尹美莱、Tiger JK、Bizzy",255.0).is_none(),"{other} 不能当成原版");
+        }
+        assert_eq!(without_alias("ANGEL (天使)"),"ANGEL");
+        assert_eq!(without_alias("Track (Live)"),"Track (Live)");
+        assert_eq!(without_alias("Track ()"),"Track ()");
+    }
+
     use super::*;
+    #[test]
+    fn known_duration_cache_precedes_newer_unknown_duration(){
+        let dir=std::env::temp_dir().join(format!("daozai-krc-duration-rank-{}",std::process::id()));fs::create_dir_all(&dir).unwrap();
+        let known=dir.join("Artist - Track-0123456789abcdef0123456789abcdef.krc");
+        let unknown=dir.join("Artist - Track-1123456789abcdef0123456789abcdef.krc");
+        fs::write(&known,fixture("[ti:Track]\n[ar:Artist]\n[total:120000]\n[1000,500]已核对时长")).unwrap();
+        fs::write(&unknown,fixture("[ti:Track]\n[ar:Artist]\n[total:0]\n[2000,500]缺少时长")).unwrap();
+        let file=fs::File::options().write(true).open(&unknown).unwrap();
+        file.set_times(fs::FileTimes::new().set_modified(std::time::SystemTime::now()+std::time::Duration::from_secs(60))).unwrap();drop(file);
+        assert_eq!(read_directory(&dir,"Track","Artist",120.0).unwrap().lines[0].text,"已核对时长");
+        assert_eq!(read_directory(&dir,"Track","Artist",0.0).unwrap().lines[0].text,"缺少时长");
+        fs::remove_file(known).unwrap();fs::remove_file(unknown).unwrap();fs::remove_dir(dir).unwrap();
+    }
+    #[test]
+    fn cached_duet_identity_ignores_order_and_credit_field(){
+        let dir=std::env::temp_dir().join(format!("daozai-krc-featured-identity-{}",std::process::id()));fs::create_dir_all(&dir).unwrap();
+        let path=dir.join("Guest、Artist - Track-0123456789abcdef0123456789abcdef.krc");
+        fs::write(&path,fixture("[ti:Track]\n[ar:Artist、Guest]\n[total:120000]\n[1000,500]第一句")).unwrap();
+        for (title,artist) in [("Track","Artist/Guest"),("Track feat. Guest","Artist"),("Track","Artist featuring Guest")] {
+            assert!(read_directory(&dir,title,artist,120.0).is_some());
+        }
+        for (title,artist,duration) in [("Track (Live)","Artist/Guest",120.0),("Track","Artist/Other",120.0),("Track","Artist",120.0),("Track","Artist/Guest",150.0)] {
+            assert!(read_directory(&dir,title,artist,duration).is_none());
+        }
+        fs::remove_file(path).unwrap();fs::remove_dir(dir).unwrap();
+    }
     #[test]
     #[ignore="只读验证本机已缓存的合唱及空头部歌词"]
     fn live_incomplete_krc_headers() {

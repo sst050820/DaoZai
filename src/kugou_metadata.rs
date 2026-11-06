@@ -14,7 +14,11 @@ fn track(raw:&[u8],filename:&str)->Option<(String,f64)>{
 
 fn scan(bytes:&[u8],filename:&str)->Option<(String,f64)>{
     const MARKER:&[u8]=b"\"duration\":";
-    for (offset,_) in bytes.windows(MARKER.len()).enumerate().filter(|(_,b)|*b==MARKER) {
+    // 先按首字节快速定位（标准库对单字节查找有向量化实现），再比对完整标记。
+    let mut from=0;
+    while let Some(found)=bytes[from..].iter().position(|&b|b==b'"') {
+        let offset=from+found;from=offset+1;
+        if !bytes[offset..].starts_with(MARKER){continue;}
         // 只保留歌曲字段；不读取或记录周围的请求、账号或日志内容。
         let end=(offset+8192).min(bytes.len());
         let mut raw=Vec::with_capacity(end-offset+1);raw.push(b'{');raw.extend_from_slice(&bytes[offset..end]);
@@ -78,7 +82,7 @@ fn current(title:&str,artist:&str)->Option<(u32,String)>{
 
 fn read(pid:u32,filename:&str)->Option<(String,f64)>{
     let process=Process(unsafe{OpenProcess(0x410,0,pid)});if process.0.is_null(){return None;}
-    let start=Instant::now();let mut address=0;let mut total=0;
+    let start=Instant::now();let mut address=0;let mut total=0;let mut bytes=Vec::new();
     while total<256*1024*1024 && start.elapsed()<Duration::from_secs(2) {
         let mut region=Region::default();
         if unsafe{VirtualQueryEx(process.0,address,&mut region,std::mem::size_of::<Region>())}==0{break;}
@@ -86,7 +90,9 @@ fn read(pid:u32,filename:&str)->Option<(String,f64)>{
         if region.state!=0x1000 || region.kind!=0x20000 || region.protect!=4 {continue;}
         let mut offset=0;
         while offset<region.size && total<256*1024*1024 && start.elapsed()<Duration::from_secs(2) {
-            let size=(region.size-offset).min(1024*1024);let mut bytes=vec![0;size];let mut count=0;
+            let size=(region.size-offset).min(1024*1024);let mut count=0;
+            // 复用同一块缓冲，避免每 1 MiB 重新分配并清零。
+            if bytes.len()<size{bytes.resize(size,0);}
             if unsafe{ReadProcessMemory(process.0,region.base+offset,bytes.as_mut_ptr().cast(),size,&mut count)}!=0 {
                 if let Some(metadata)=scan(&bytes[..count],filename){return Some(metadata);}
             }
@@ -97,8 +103,18 @@ fn read(pid:u32,filename:&str)->Option<(String,f64)>{
     None
 }
 
+/// 同一首歌最多扫描这么多次；第 n 次失败后等待 RETRY[n] 再试，用完即放弃。
+const RETRY:[Duration;3]=[Duration::from_secs(5),Duration::from_secs(30),Duration::MAX];
+/// 歌曲不变时，窗口标题最多每秒核对一次（读取其他进程的窗口标题是跨进程消息）。
+const WINDOW_RECHECK:Duration=Duration::from_secs(1);
+
 #[derive(Default)]
-pub struct Cache {key:Option<(u32,String)>,value:Option<(String,f64)>,checked:Option<Instant>,seen:Option<Instant>}
+pub struct Cache {
+    key:Option<(u32,String)>,value:Option<(String,f64)>,checked:Option<Instant>,seen:Option<Instant>,
+    failures:usize,
+    /// 上次窗口核对：用哪组标题/歌手、何时、结果。
+    looked:Option<(String,String,Instant,Option<(u32,String)>)>,
+}
 impl Cache {
     fn recent_key(&self,title:&str,artist:&str)->Option<(u32,String)>{
         if self.seen?.elapsed()>Duration::from_secs(2){return None;}
@@ -106,14 +122,31 @@ impl Cache {
         window_filename(&format!("{} - 酷狗音乐",key.1),title,artist)?;
         Some(key.clone())
     }
-    pub fn get(&mut self,title:&str,artist:&str)->Option<(String,f64)>{
-        // 循环重载时窗口标题会短暂消失；同一首歌最多沿用两秒已核对的身份。
-        let key=if let Some(key)=current(title,artist){self.seen=Some(Instant::now());key}else{self.recent_key(title,artist)?};
-        if self.key.as_ref()!=Some(&key){self.key=Some(key.clone());self.value=None;self.checked=None;}
-        if self.value.is_none() && self.checked.is_none_or(|at|at.elapsed()>=Duration::from_secs(5)) {
-            self.checked=Some(Instant::now());self.value=read(key.0,&key.1);
+    fn window(&mut self,title:&str,artist:&str,fresh:bool)->Option<(u32,String)>{
+        if !fresh {
+            if let Some((t,a,at,found))=&self.looked {
+                if t==title && a==artist && at.elapsed()<WINDOW_RECHECK {return found.clone();}
+            }
         }
-        if current(title,artist).is_some_and(|next|next!=key){return None;}
+        let found=current(title,artist);
+        self.looked=Some((title.to_owned(),artist.to_owned(),Instant::now(),found.clone()));
+        found
+    }
+    fn due(&self)->bool{
+        self.value.is_none() && self.failures<RETRY.len()
+            && self.checked.is_none_or(|at|self.failures==0 || at.elapsed()>=RETRY[self.failures-1])
+    }
+    /// `need_duration` 为假（系统已给出有效曲长）时只用窗口标题补全歌手，不扫描进程内存。
+    pub fn get(&mut self,title:&str,artist:&str,need_duration:bool)->Option<(String,f64)>{
+        // 循环重载时窗口标题会短暂消失；同一首歌最多沿用两秒已核对的身份。
+        let key=if let Some(key)=self.window(title,artist,false){self.seen=Some(Instant::now());key}else{self.recent_key(title,artist)?};
+        if self.key.as_ref()!=Some(&key){self.key=Some(key.clone());self.value=None;self.checked=None;self.failures=0;}
+        if need_duration && self.due() {
+            self.checked=Some(Instant::now());self.value=read(key.0,&key.1);
+            if self.value.is_none(){self.failures+=1;}
+            // 扫描期间可能已切歌，扫描后重新核对一次窗口。
+            if self.window(title,artist,true).is_some_and(|next|next!=key){return None;}
+        }
         // 曲长尚未就绪也能使用已核对的窗口署名，不能让合唱退化为单个歌手。
         let singer=key.1.strip_suffix(&format!(" - {title}"))?.to_owned();
         Some((singer,self.value.as_ref().map_or(0.0,|(_,duration)|*duration)))
@@ -139,6 +172,23 @@ mod tests {
         }
         for artist in ["添儿","另一歌手","添儿呗、另一歌手"] {assert!(window_filename(window,"溺云歌",artist).is_none());}
         assert!(window_filename(window,"溺云歌 (Live)","添儿呗").is_none());
+    }
+    #[test]
+    fn failed_scans_back_off_then_stop_for_the_same_song(){
+        let mut cache=Cache::default();
+        assert!(cache.due());
+        cache.checked=Some(Instant::now());cache.failures=1;assert!(!cache.due(),"失败后不能下一轮立刻重扫");
+        cache.checked=Some(Instant::now()-Duration::from_secs(6));assert!(cache.due());
+        cache.failures=2;assert!(!cache.due());
+        cache.checked=Some(Instant::now()-Duration::from_secs(31));assert!(cache.due());
+        cache.failures=3;cache.checked=Some(Instant::now()-Duration::from_secs(3600));assert!(!cache.due(),"同一首歌三次失败后不再扫描");
+        cache.failures=0;cache.value=Some(("a".into(),1.0));assert!(!cache.due(),"已拿到曲长不再扫描");
+    }
+    #[test]
+    fn scan_finds_markers_anywhere_including_after_quotes(){
+        let raw=br#""""duration":x "\"duration":"232000","filename":"A - B","type":"song","hash":"8c4c4839a9aa418f528ebb7a8ce42afe"}"#;
+        assert_eq!(scan(raw,"A - B"),Some(("A".into(),232.0)));
+        assert!(scan(b"","A - B").is_none());assert!(scan(b"\"","A - B").is_none());
     }
     #[test]
     fn scan_ignores_unrelated_and_truncated_objects(){

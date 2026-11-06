@@ -27,27 +27,36 @@ fn make_item(parsed:Parsed,fetch:&imap::types::Fetch,account:&Account)->Item{
         code:code_of(&parsed),summary:body_of(&parsed).into(),links:links_of(&parsed),meeting:meeting_of(&parsed.calendar),uid:fetch.uid.unwrap_or(0)}
 }
 
+/// 服务器明确拒绝了这条命令（NO / BAD）：连接仍然同步，可以换一种方式读这封信。
+/// 其他错误（超时、解析失败、连接中断）说明响应没读完，这条连接已经不能再用，
+/// 必须交给上层断开重连；继续发命令会读到上一条命令残留的响应。
+fn rejected(error:&imap::Error)->bool{matches!(error,imap::Error::No(_)|imap::Error::Bad(_))}
+
 // 部分旧服务器没有 BODYSTRUCTURE 或 MIME 分段支持，继续使用原有完整读取路径。
 fn legacy<S:Read+Write>(session:&mut imap::Session<S>,uid:u32,account:&Account)->Result<Option<Item>,()>{
-    let fetched=session.uid_fetch(uid.to_string(),"(UID INTERNALDATE BODY.PEEK[HEADER] BODY.PEEK[TEXT])").map_err(|_|())?;
+    let fetched=match session.uid_fetch(uid.to_string(),"(UID INTERNALDATE BODY.PEEK[HEADER] BODY.PEEK[TEXT])"){
+        Ok(fetched)=>fetched,Err(error) if rejected(&error)=>return Ok(None),Err(_)=>return Err(()),
+    };
     let Some(fetch)=fetched.iter().find(|f|f.uid==Some(uid))else{return Ok(None)};
-    let mut raw=fetch.header().ok_or(())?.to_vec();raw.extend_from_slice(b"\r\n");
+    let Some(header)=fetch.header() else{return Ok(None)};
+    let mut raw=header.to_vec();raw.extend_from_slice(b"\r\n");
     if let Some(text)=fetch.text(){raw.extend_from_slice(text);}
     Ok(Some(make_item(parse_message(&raw),fetch,account)))
 }
 
 pub(super) fn item<S:Read+Write>(session:&mut imap::Session<S>,uid:u32,account:&Account)->Result<Option<Item>,()>{
     let fetched=match session.uid_fetch(uid.to_string(),"(UID INTERNALDATE BODYSTRUCTURE BODY.PEEK[HEADER])"){
-        Ok(fetched)=>fetched,Err(_)=>return legacy(session,uid,account),
+        Ok(fetched)=>fetched,Err(error) if rejected(&error)=>return legacy(session,uid,account),Err(_)=>return Err(()),
     };
     let Some(fetch)=fetched.iter().find(|f|f.uid==Some(uid))else{return Ok(None)};
     let Some(body)=fetch.bodystructure()else{return legacy(session,uid,account)};
     let mut selected=Vec::new();parts(body,&mut Vec::new(),&mut selected);
-    let mut parsed=parse_message(fetch.header().ok_or(())?);
+    let Some(header)=fetch.header() else{return legacy(session,uid,account)};
+    let mut parsed=parse_message(header);
     for path in selected {
         let section=path.iter().map(u32::to_string).collect::<Vec<_>>().join(".");
         let result=session.uid_fetch(uid.to_string(),format!("(UID BODY.PEEK[{section}.MIME] BODY.PEEK[{section}])"));
-        let Ok(part)=result else{return legacy(session,uid,account)};
+        let part=match result{Ok(part)=>part,Err(error) if rejected(&error)=>return legacy(session,uid,account),Err(_)=>return Err(())};
         let data=part.iter().find(|f|f.uid==Some(uid)).and_then(|f|Some((
             f.section(&SectionPath::Part(path.clone(),Some(MessageSection::Mime)))?,
             f.section(&SectionPath::Part(path,None))?,
@@ -84,6 +93,36 @@ mod tests {
         let commands=String::from_utf8(output.lock().unwrap().clone()).unwrap();(item,commands)
     }
     fn literal(text:&str)->String{format!("{{{}}}\r\n{text}",text.len())}
+    fn wire(input:&str)->(imap::Session<Wire>,Arc<Mutex<Vec<u8>>>){
+        let output=Arc::new(Mutex::new(Vec::new()));
+        let wire=Wire{input:Cursor::new(format!("a1 OK login\r\n{input}").into_bytes()),output:output.clone()};
+        (imap::Client::new(wire).login("test","test").unwrap(),output)
+    }
+    fn account()->Account{Account {custom: None, email:"test@example.com".into(),provider:super::super::Provider::Qq,enabled:true}}
+    #[test]
+    fn out_of_sync_response_reports_an_error_instead_of_crashing(){
+        // 用户崩溃日志：vendor\imap\src\client.rs:1369 的标签断言。a2 的位置收到上一条命令迟到的 a1 结束行。
+        let (mut session,output)=wire("a1 OK late\r\n* 1 FETCH (UID 42 BODY[HEADER] {9}\r\nSubject:\n)\r\na2 OK fetch\r\n");
+        assert!(item(&mut session,42,&account()).is_err(),"错位的连接应交给上层重连");
+        let commands=String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert!(!commands.contains("BODY.PEEK[TEXT]"),"连接失步后不能再发备用读取命令");
+        assert!(matches!(session.noop(),Err(imap::Error::ConnectionLost)));
+    }
+    #[test]
+    fn unparseable_fetch_does_not_reuse_the_connection(){
+        let (mut session,output)=wire("* 1 FETCH (UID 42 BODYSTRUCTURE ((((\r\na2 OK fetch\r\n* 1 FETCH (UID 42 BODY[HEADER] {9}\r\nSubject:\n BODY[TEXT] {1}\r\nx)\r\na3 OK fetch\r\n");
+        assert!(item(&mut session,42,&account()).is_err());
+        let commands=String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert!(!commands.contains("BODY.PEEK[TEXT]"));
+    }
+    #[test]
+    fn server_rejection_still_falls_back_on_the_same_connection(){
+        let header="Subject: Old server\r\nContent-Type: text/plain\r\n\r\n";
+        let (mut session,_)=wire(&format!("a2 NO unsupported\r\n* 1 FETCH (UID 42 BODY[HEADER] {} BODY[TEXT] {})\r\na3 OK fetch\r\n",literal(header),literal("Full text")));
+        let item=item(&mut session,42,&account()).unwrap().unwrap();
+        assert_eq!(item.summary.as_ref(),"Full text");
+    }
+
     #[test]
     fn qq_empty_body_structure_accepts_nil_transfer_encoding(){
         let response=b"* 1 FETCH (UID 42 BODYSTRUCTURE (\"TEXT\" \"PLAIN\" (\"CHARSET\" \"UTF-8\") NIL NIL NIL 0 0 NIL NIL NIL))\r\n";

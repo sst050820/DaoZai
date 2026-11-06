@@ -73,16 +73,16 @@ fn session_path(slot:&str)->Result<PathBuf,String>{
     Ok(crate::model::config_dir().join("credentials").join(format!("gemini-{slot}.bin")))
 }
 #[cfg(windows)]
-fn protect(raw:&[u8],encrypt:bool)->Result<Vec<u8>,String>{
+pub(super) fn protect(raw:&[u8],encrypt:bool)->Result<Vec<u8>,String>{
     use windows::Win32::{Foundation::{HLOCAL,LocalFree},Security::Cryptography::{CryptProtectData,CryptUnprotectData,CRYPT_INTEGER_BLOB,CRYPTPROTECT_UI_FORBIDDEN}};
     let input=CRYPT_INTEGER_BLOB{cbData:raw.len().try_into().map_err(|_|LOGIN_ERROR)?,pbData:raw.as_ptr().cast_mut()};let mut output=CRYPT_INTEGER_BLOB::default();
     unsafe{
-        if encrypt{CryptProtectData(&input,None,None,None,None,CRYPTPROTECT_UI_FORBIDDEN,&mut output)}else{CryptUnprotectData(&input,None,None,None,None,CRYPTPROTECT_UI_FORBIDDEN,&mut output)}.map_err(|_|"无法访问 Windows 安全保存的 Gemini 登录")?;
+        if encrypt{CryptProtectData(&input,None,None,None,None,CRYPTPROTECT_UI_FORBIDDEN,&mut output)}else{CryptUnprotectData(&input,None,None,None,None,CRYPTPROTECT_UI_FORBIDDEN,&mut output)}.map_err(|_|"无法访问 Windows 安全保存的登录会话")?;
         let bytes=std::slice::from_raw_parts(output.pbData,output.cbData as usize).to_vec();let _=LocalFree(HLOCAL(output.pbData.cast()));Ok(bytes)
     }
 }
 #[cfg(not(windows))]
-fn protect(_raw:&[u8],_encrypt:bool)->Result<Vec<u8>,String>{Err("当前系统暂不支持安全保存 Gemini 登录".into())}
+pub(super) fn protect(_raw:&[u8],_encrypt:bool)->Result<Vec<u8>,String>{Err("当前系统暂不支持安全保存登录会话".into())}
 fn save(session:&Session)->Result<String,String>{
     let slot=slot(&session.email);let path=session_path(&slot)?;
     let raw=json!({"email":session.email,"cookie":session.cookie}).to_string();let encrypted=protect(raw.as_bytes(),true)?;
@@ -160,6 +160,15 @@ mod tests {
         use std::net::TcpListener;let server=TcpListener::bind("127.0.0.1:0").unwrap();let url=format!("http://{}/quota",server.local_addr().unwrap());
         let task=std::thread::spawn(move||{let(mut stream,_)=server.accept().unwrap();let mut bytes=[0u8;4096];let n=stream.read(&mut bytes).unwrap();let raw=String::from_utf8_lossy(&bytes[..n]);assert!(raw.starts_with("GET /quota HTTP/1.1"));assert!(raw.to_ascii_lowercase().contains("cookie: sid=synthetic"));use std::io::Write;stream.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 14\r\nConnection: close\r\n\r\nprivate-secret").unwrap();});
         let session=Session{email:"synthetic@example.com".into(),cookie:"SID=synthetic".into()};let error=request(&ureq::AgentBuilder::new().redirects(0).build(),&url,&session).unwrap_err();assert!(error.0.contains("重新连接"));assert!(!error.0.contains("private-secret"));task.join().unwrap();
+    }
+    #[test] #[ignore="刷新已绑定的 Gemini 浏览器登录并安全保存"]
+    fn gemini_browser_reconnect_local(){
+        let config=super::super::Config::load();
+        let a=config.accounts.iter().find(|a|a.enabled && a.provider==super::super::Provider::Gemini).unwrap();
+        let current=load(a).unwrap();
+        let session=browser_session(&current.email).unwrap();
+        let snapshot=request(&super::super::http_agent(),&request_url(&session.email),&session).unwrap();
+        assert!(!snapshot.windows.is_empty());assert_eq!(a.slot.as_ref(),Some(&slot(&session.email)));save(&session).unwrap();
     }
     #[test] #[ignore="按需验证已登录浏览器的真实 Gemini 额度"] fn gemini_browser_live_read_only(){
         let session=browser_session("").unwrap();let s=request(&super::super::http_agent(),&request_url(&session.email),&session).unwrap();println!("Gemini 真实额度：{} 个周期，剩余 {:?}",s.windows.len(),s.windows.iter().map(|w|w.remaining).collect::<Vec<_>>());assert!(!s.windows.is_empty());

@@ -159,7 +159,7 @@ impl State {
                             ui.vertical(|ui| {
                                 ui.label(egui::RichText::new("岛仔有新版本了").font(theme::font(21.0,W::Semibold)));
                                 ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new(env!("CARGO_PKG_VERSION")).color(theme::DIM));
+                                    ui.label(egui::RichText::new(option_env!("DAOZAI_BUILD_LABEL").unwrap_or(env!("CARGO_PKG_VERSION"))).color(theme::DIM));
                                     ui.label(egui::RichText::new("→").color(theme::DIM));
                                     egui::Frame::new().fill(theme::alpha_blue(0.12)).corner_radius(6.0)
                                         .inner_margin(egui::Margin::symmetric(8,3)).show(ui, |ui| {

@@ -17,7 +17,7 @@ fn main()->eframe::Result<()> {
                 let out=self.app.frame(ui,egui::Rect::from_min_size(ui.max_rect().min,egui::vec2(WIN_W,WIN_H)),&env);
                 self.min_width=self.min_width.min(out.hit.width());self.max_width=self.max_width.max(out.hit.width());
                 let r=|r:egui::Rect|(r.min.x,r.min.y,r.width(),r.height());
-                self.native.update(r(out.region),r(out.hit),out.notice_hit.map(r),out.file_drop_zone.map(r),ctx.pixels_per_point(),false,out.expanded);
+                self.native.update(r(out.region),r(out.hit),out.notice_hit.map(r),out.file_drop_zone.map(r),out.glass.as_deref(),ctx.pixels_per_point(),false,out.expanded);
             });
             // 首帧建立媒体来源后再注入歌词，避免被当成上一播放器的结果清空。
             if self.frames==1 {self.app.set_lyrics("性能检查","测试",450.0,daozai::lyrics::parse_lrc("[00:00]灰色的夜\n[06:00]还在眼前"));}

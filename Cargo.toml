@@ -1,6 +1,6 @@
 [package]
 name = "daozai"
-version = "0.6.53"
+version = "0.6.60"
 edition = "2021"
 license = "MIT"
 description = "岛仔：Windows 顶部的桌面伙伴与信息岛"
@@ -30,9 +30,10 @@ imap-proto = { path = "vendor/imap-proto" }
 eframe = { path = "vendor/eframe" }
 
 [dependencies]
-eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts"] }
-egui_extras = { version = "0.31", default-features = false, features = ["svg"] }
+eframe = { version = "0.31", default-features = false, features = ["glow", "wgpu", "default_fonts"] }
+egui_extras = { version = "0.31", default-features = false, features = ["svg", "image"] }
 ureq = { version = "2.12", default-features = false, features = ["tls", "gzip"] }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
 flate2 = "1"
@@ -52,12 +53,15 @@ rrule = "0.14.0"
 eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts", "x11"] }
 
 [target.'cfg(windows)'.dependencies]
+clipboard-win = "5.4.3"
+wgpu = { version = "24", default-features = false, features = ["dx12"] }
 memmap2 = "0.9.12"
 windows = { version = "0.58", features = [
   "Win32_Foundation",
   "Win32_Graphics_Gdi",
   "Win32_Graphics_Dwm",
   "Win32_System_LibraryLoader",
+  "Win32_System_Memory",
   "Win32_System_Com",
   "Win32_System_DataExchange",
   "Win32_Security",
@@ -66,6 +70,7 @@ windows = { version = "0.58", features = [
   "Win32_System_Registry",
   "Win32_System_SystemInformation",
   "Win32_System_Threading",
+  "Win32_System_Diagnostics_ToolHelp",
   "Win32_Storage_FileSystem",
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_Input_Ime", "Win32_UI_TextServices",
@@ -80,6 +85,7 @@ windows = { version = "0.58", features = [
   "Win32_Media_Audio_Endpoints",
   "Win32_Media_Audio",
   "Win32_System_WinRT",
+  "Win32_System_WinRT_Composition", "UI_Composition", "UI_Composition_Desktop", "System", "Foundation_Numerics",
   "UI_Notifications_Management",
   "UI_Notifications", "ApplicationModel",
   "Win32_System_Ole", "Win32_UI_Shell_Common", "Networking_Connectivity",

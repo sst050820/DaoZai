@@ -589,6 +589,8 @@ mod tests {
     #[test]
     fn repeated_launch_requests_settings_or_calendar() {
         let tray=Tray::start(State::default()).expect("托盘应能启动");
+        // 自建版首次添加托盘图标失败时会在后台重试至多 4 秒；等待消息循环恢复后再验证二次启动唤起。
+        std::thread::sleep(Duration::from_millis(4500));
         for (calendar,expected) in [(false,Event::OpenSettings),(true,Event::OpenCalendar)] {
             assert!(request_existing_window(tray.hwnd(),calendar));
             assert_eq!(tray.events.recv_timeout(Duration::from_secs(2)).unwrap(),expected);

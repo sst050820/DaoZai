@@ -8,6 +8,7 @@ use daozai::poll_clock::PollClock;
 use std::time::{Duration, Instant};
 
 mod diagnostics;
+mod graphics;
 
 struct Shell {
     app: App,
@@ -16,10 +17,16 @@ struct Shell {
     frame_at: Instant,
     media: smtc::Shared,
     seek_rx: Option<std::sync::mpsc::Receiver<bool>>,
-    media_enabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    media_control:Option<smtc::ControlWorker>,
+    _resource_monitor:Option<daozai::resources::Monitor>,
+    resource_at:PollClock,
+    guard_notified:bool,
+    media_enabled: smtc::Poller,
     placed: bool,
     placement_at: PollClock,
     placement_scale: f32,
+    /// 上次定位时的目标屏幕与水平位置；变化后立即重新定位，不等下一次轮询。
+    placement_key: (String, i32, daozai::model::Dock),
     win_x: f32,
     sys: (Option<u8>, bool, PollClock),
     #[cfg(windows)]
@@ -33,9 +40,21 @@ struct Shell {
     #[cfg(windows)]
     input_keys:Option<daozai::input::Shortcuts>,
     #[cfg(windows)]
-    incoming: Option<std::sync::mpsc::Receiver<daozai::system::Incoming>>,
+    incoming: Option<daozai::system::Notifications>,
+    #[cfg(windows)]
+    wechat: Option<daozai::wechat::Listener>,
+    #[cfg(windows)]
+    wechat_retry: Option<Instant>,
+    #[cfg(windows)]
+    opening_messenger:Option<(app::Unread,Instant)>,
+    /// 后台线程正在通过托盘按钮唤起微信。
+    #[cfg(windows)]
+    tray_opening:Option<(app::Unread,std::sync::mpsc::Receiver<Result<(),String>>)>,
     #[cfg(windows)]
     hidden: bool,
+    /// 毛玻璃皮肤的背景亮度采样（仅毛玻璃皮肤运行）。
+    #[cfg(windows)]
+    backdrop: Option<daozai::backdrop::Sampler>,
     #[cfg(windows)]
     native: Option<daozai::native::Window>,
     #[cfg(windows)]
@@ -68,6 +87,8 @@ impl Shell {
         #[cfg(not(feature="record"))] let quota_demo=false;
         diagnostics::startup("初始化额度配置");
         if !quota_demo{app.quota_initialize();}
+        diagnostics::startup("启动剪贴板记录");
+        {let ctx=cc.egui_ctx.clone();daozai::clipboard::watch(app.clipboard.clone(),move||ctx.request_repaint());}
         if std::env::args().any(|arg|arg=="--settings"){app.open_settings();}
         if std::env::args().any(|arg|arg=="--calendar"){app.open_calendar(None);}
         #[cfg(feature="record")]
@@ -90,12 +111,14 @@ impl Shell {
         });
         diagnostics::startup("初始化通知监听");
         #[cfg(windows)]
-        let incoming=if app.settings.read_notifications {match daozai::system::connect(){Ok(rx)=>Some(rx),Err(e)=>{app.listener_status=format!("Windows 无法读取通知：{}",e.code());None}}}else{None};
+        let incoming=if app.settings.read_notifications {match daozai::system::connect(cc.egui_ctx.clone(),app.settings.qq_only){Ok(rx)=>Some(rx),Err(e)=>{app.listener_status=format!("Windows 无法读取通知：{}",e.code());None}}}else{None};
         // 音频、网络与输入法查询由后台完成，避免首帧等待系统服务。
         diagnostics::startup("创建后台采样与窗口");
         let initial_input=None;
         #[cfg(windows)] let system_state=daozai::system::Snapshot::default();
         #[cfg(windows)] let system_rx=daozai::system::observe(cc.egui_ctx.clone(),system_state.clone(),initial_input);
+        // 岛体大小只作用于主窗口，在首帧之前生效，避免启动时先按 100% 闪一下。
+        #[cfg(windows)] eframe::set_root_viewport_scale(app.settings.island_scale());
         Self {
             app,
             t0: Instant::now(),
@@ -103,10 +126,15 @@ impl Shell {
             frame_at: Instant::now(),
             media,
             seek_rx: None,
+            media_control:None,
+            _resource_monitor:daozai::resources::Monitor::start(daozai::model::config_dir().join("diagnostics")),
+            resource_at:PollClock::default(),
+            guard_notified:false,
             media_enabled,
             placed: false,
             placement_at: PollClock::default(),
             placement_scale: 0.0,
+            placement_key: (String::new(), 0, daozai::model::Dock::Top),
             win_x: 0.0,
             sys: (None, false, PollClock::default()),
             #[cfg(windows)]
@@ -117,7 +145,12 @@ impl Shell {
             input_state:daozai::input::Monitor::new(initial_input),
             #[cfg(windows)] input_keys:daozai::input::Shortcuts::start(),
             #[cfg(windows)] incoming,
+            #[cfg(windows)] wechat:None,
+            #[cfg(windows)] wechat_retry:None,
+            #[cfg(windows)] opening_messenger:None,
+            #[cfg(windows)] tray_opening:None,
             #[cfg(windows)] hidden:false,
+            #[cfg(windows)] backdrop:None,
             #[cfg(windows)]
             native: daozai::native::Window::new(cc),
             #[cfg(windows)]
@@ -179,11 +212,23 @@ impl Shell {
             if self.app.settings.show_battery && b.is_some_and(|v|v<=20) && !c && self.sys.0.is_some_and(|v|v>20) {self.app.alert("电量偏低",format!("剩余 {}% · 请连接电源",b.unwrap()),5,true);}
             self.sys = (b, c, PollClock::now());
         }
-        let ppp = ctx.pixels_per_point();
+        let ppp = (ctx.pixels_per_point()*eframe::root_frame_paint_scale());
         let origin = ctx.input(|i| i.viewport().outer_rect).map(|r| r.min).unwrap_or(Pos2::new(self.win_x, 0.0));
         #[cfg(windows)]
         let origin=self.native.as_ref().and_then(|w|w.logical_origin(ppp)).unwrap_or(origin);
         let cursor = cursor_logical(ppp).map(|(x, y)| Pos2::new(x - origin.x, y - origin.y));
+        // 所在屏幕换算到窗口逻辑坐标，供通知详情等浮层避开屏幕边缘。
+        #[cfg(windows)]
+        let screen=daozai::display_layout::selected(&self.app.displays,&self.app.settings.display_id).map(|d|{
+            let b=d.bounds;
+            egui::Rect::from_min_max(Pos2::new(b.left as f32/ppp-origin.x,b.top as f32/ppp-origin.y),Pos2::new(b.right as f32/ppp-origin.x,b.bottom as f32/ppp-origin.y))
+        });
+        #[cfg(not(windows))]
+        let screen=None;
+        #[cfg(windows)]
+        let (backdrop,glass_blur)=(self.backdrop.as_ref().and_then(|b|b.color()),self.native.as_ref().is_some_and(|w|w.blur_active()));
+        #[cfg(not(windows))]
+        let (backdrop,glass_blur)=(None,false);
         Env {
             t: self.t0.elapsed().as_secs_f64(),
             clock,
@@ -205,6 +250,13 @@ impl Shell {
             volume: self.system_state.volume,
             bt: self.bt.clone(),
             bt_ready: self.bt_ready,
+            screen,
+            backdrop,
+            glass_blur,
+            opaque_surface: {
+                #[cfg(windows)] {self.native.as_ref().is_some_and(|w|w.opaque_surface())}
+                #[cfg(not(windows))] {false}
+            },
         }
     }
 }
@@ -215,7 +267,23 @@ impl eframe::App for Shell {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.media_enabled.store(self.app.settings.visible_pages[0],std::sync::atomic::Ordering::Relaxed);
+        if self.resource_at.ready(Duration::from_secs(30)){
+            let (count,bytes)={let textures=ctx.tex_manager();let textures=textures.read();(textures.num_allocated(),textures.allocated().map(|(_,info)|info.bytes_used()).sum())};
+            daozai::resources::TEXTURES.store(count,std::sync::atomic::Ordering::Relaxed);
+            daozai::resources::TEXTURE_BYTES.store(bytes,std::sync::atomic::Ordering::Relaxed);
+            daozai::resources::GALLEYS.store(ctx.fonts(|fonts|fonts.num_galleys_in_cache()),std::sync::atomic::Ordering::Relaxed);
+            self.resource_at=PollClock::now();
+        }
+        let guarded=daozai::resources::GUARD.tripped();
+        if guarded && !self.guard_notified {
+            // 资源保护熔断：停止音乐会话轮询（含封面、网易云日志）与歌词查询，保住用户电脑，重启后恢复。
+            self.guard_notified=true;self.app.opts.fetch_lyrics=false;
+            self.app.alert("岛仔已暂停音乐功能","检测到资源占用异常，已暂停读取音乐信息和歌词。重启岛仔即可恢复；诊断记录在数据目录的 diagnostics 文件夹。",0,false);
+        }
+        self.media_enabled.store(self.app.settings.visible_pages[0] && !guarded,std::sync::atomic::Ordering::Relaxed);
+        // 设置里改了岛体大小：下一帧起主窗口按新倍率栅格化，定位逻辑随像素比变化同步调整画布。
+        #[cfg(windows)] eframe::share_root_font_scale(self.app.settings_open);
+        #[cfg(windows)] eframe::set_root_viewport_scale(self.app.settings.island_scale());
         #[cfg(windows)]
         {
             // 用帧间隔限制刷新，绕过部分 Intel 驱动在垂直同步中的忙等待。
@@ -226,17 +294,23 @@ impl eframe::App for Shell {
         #[cfg(windows)]
         self.poll_tray();
         #[cfg(windows)]
-        if daozai::native::take_foreground_change() {
+        let foreground_changed=daozai::native::take_foreground_change();
+        #[cfg(windows)]
+        if foreground_changed {
             // 切到别的程序：收起，并在光标离开前不再自动展开
             self.app.foreground_changed();
         }
         #[cfg(windows)]
-        if !self.placed || self.placement_scale!=ctx.pixels_per_point() || self.placement_at.ready(Duration::from_secs(1)) {
+        let placement_key=(self.app.settings.display_id.clone(),self.app.settings.island_offset,self.app.settings.dock);
+        #[cfg(windows)]
+        if !self.placed || self.placement_scale!=(ctx.pixels_per_point()*eframe::root_frame_paint_scale()) || self.placement_key!=placement_key || self.placement_at.ready(Duration::from_secs(1)) {
             self.placement_at=PollClock::now();
-            self.placement_scale=ctx.pixels_per_point();
+            self.placement_scale=(ctx.pixels_per_point()*eframe::root_frame_paint_scale());
+            self.placement_key=placement_key;
             self.app.displays=daozai::display_layout::connected();
             let display=daozai::display_layout::selected(&self.app.displays,&self.app.settings.display_id);
-            if display.is_some_and(|d|self.native.as_ref().is_some_and(|w|w.place_on_display(self.placement_scale,d.bounds))) {
+            let offset=self.app.settings.island_offset_ratio();
+            if display.is_some_and(|d|self.native.as_ref().is_some_and(|w|w.place_on_display(self.placement_scale,d.bounds,offset,self.app.settings.dock))) {
                 if !self.placed {diagnostics::startup("目标屏幕物理坐标定位完成，已请求显示");}
                 self.placed=true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
@@ -277,6 +351,17 @@ impl eframe::App for Shell {
                 self.fullscreen=observation.fullscreen;
             }
             self.hidden=daozai::display_layout::hide_for_fullscreen(self.app.settings.hide_fullscreen,self.fullscreen,daozai::display_layout::selected(&self.app.displays,&self.app.settings.display_id).map(|d|d.bounds));
+            // 毛玻璃：在岛体左右两侧和画布底边（都在窗口区域之外）取样，估计岛背后的明暗。
+            if self.app.settings.skin.is_glass() && !self.hidden {
+                let sampler=self.backdrop.get_or_insert_with(daozai::backdrop::Sampler::start);
+                let ppp=(ctx.pixels_per_point()*eframe::root_frame_paint_scale());
+                if let Some(origin)=self.native.as_ref().and_then(|w|w.logical_origin(ppp)) {
+                    let points=self.app.backdrop_points();
+                    sampler.set_points(points.iter().map(|&(x,y)|(((origin.x+x)*ppp).round() as i32,((origin.y+y)*ppp).round() as i32)).collect());
+                }
+            } else {
+                self.backdrop=None;
+            }
             if self.app.settings.bluetooth_notifications {
                 if self.bt_rx.is_none() {self.bt_rx=Some(daozai::bt::spawn());}
             } else {
@@ -287,12 +372,63 @@ impl eframe::App for Shell {
             if let Some(service)=&self.bt_rx {
                 while let Ok(found)=service.rx.try_recv(){ self.bt=found; self.bt_ready=true; }
             }
+            let wechat_enabled=self.app.settings.wechat_notifications && self.app.settings.notifications;
+            if self.wechat.as_ref().is_some_and(|listener|!listener.registered()){self.wechat=None;}
+            if !wechat_enabled {
+                self.wechat=None;
+                self.wechat_retry=None;
+                self.app.wechat_status.clear();
+            }else if self.wechat.is_none() && self.wechat_retry.is_none_or(|at|at.elapsed()>=Duration::from_secs(10)){
+                match daozai::wechat::Listener::new(ctx.clone()){
+                    Ok(listener)=>{
+                        self.wechat=Some(listener);
+                        self.wechat_retry=None;
+                        self.app.wechat_status="正在监听 · 微信任务栏闪动时提醒".into();
+                    }
+                    Err(error)=>{
+                        self.wechat_retry=Some(Instant::now());
+                        self.app.wechat_status=format!("{error} · 10 秒后重试");
+                    }
+                }
+            }
+            let previous_pending=self.app.pending_messengers.len();
+            for (pid,window) in self.wechat.as_ref().map(|listener|listener.take()).unwrap_or_default(){daozai::wechat::trace(format!("岛上显示微信未读 账号 {pid}"));self.app.receive_wechat_reminder_from(pid,window);}
             if let Some(rx)=&self.incoming {
                 while let Ok(event)=rx.try_recv(){match event {daozai::system::Incoming::Revoked=>{self.app.settings.read_notifications=false;self.app.settings.save();},daozai::system::Incoming::Status(s)=>self.app.listener_status=s,daozai::system::Incoming::Message(a,id,b)=>self.app.receive_notification(a,id,b)}}
             }
+            if foreground_changed || self.app.pending_messengers.len()!=previous_pending {
+                // 在微信 / QQ 里打开了某个账号的窗口：清掉这个账号的未读。
+                let mut sources:Vec<app::Messenger>=self.app.pending_messengers.iter().map(|u|u.source).collect();sources.dedup();
+                match daozai::wechat::foreground_client(&sources){
+                    Some((source,pid))=>{
+                        if self.app.pending_messengers.iter().any(|u|u.source==source){daozai::wechat::trace(format!("岛上清除 {} 账号 {pid}（前台切换={foreground_changed}）",source.name()));}
+                        self.app.viewed_client(source,pid);
+                    }
+                    None=>if foreground_changed && !sources.is_empty(){daozai::wechat::trace(format!("前台切换但不是消息客户端主窗口：{}；岛上未读 {:?}",daozai::wechat::describe_foreground(),self.app.pending_messengers.iter().map(|u|(u.source.name(),u.pid)).collect::<Vec<_>>()));},
+                }
+            }
+            if let Some((unread,rx))=&self.tray_opening {
+                let unread=*unread;
+                match rx.try_recv(){
+                    Ok(Ok(()))=>{self.tray_opening=None;self.opening_messenger=Some((unread,Instant::now()));ctx.request_repaint_after(Duration::from_secs(4));}
+                    Ok(Err(error))=>{self.tray_opening=None;self.app.say(error);}
+                    Err(std::sync::mpsc::TryRecvError::Disconnected)=>{self.tray_opening=None;self.app.say("未能唤起微信，请从托盘打开");}
+                    Err(std::sync::mpsc::TryRecvError::Empty)=>{}
+                }
+            }
+            if let Some((unread,started))=self.opening_messenger {
+                if !self.app.pending_messengers.contains(&unread){self.opening_messenger=None;}
+                else if started.elapsed()>=Duration::from_secs(4){
+                    self.opening_messenger=None;
+                    match daozai::wechat::foreground_client(&[unread.source]){
+                        Some((source,pid))=>self.app.viewed_client(source,pid),
+                        None=>self.app.say(format!("{}尚未切到前台，可点图标重试",unread.source.name())),
+                    }
+                }
+            }
         }
         if let Some(rx)=&self.seek_rx {
-            if let Ok(success)=rx.try_recv(){
+            if let Some(success)=match rx.try_recv(){Ok(success)=>Some(success),Err(std::sync::mpsc::TryRecvError::Disconnected)=>Some(false),Err(_)=>None}{
                 self.seek_rx=None;
                 if !success{self.app.say("播放器未完成跳转，请打开客户端后重试");}
             }
@@ -333,7 +469,9 @@ impl eframe::App for Shell {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(Color32::TRANSPARENT))
             .show(ctx, |ui| {
-                let win = egui::Rect::from_min_size(ui.max_rect().min,egui::vec2(app::WIN_W,app::WIN_H));
+                // 左右停靠时画布是竖向的 SIDE_W × SIDE_H。
+                let size=if self.app.settings.dock.is_side() {egui::vec2(daozai::side_dock::SIDE_W,daozai::side_dock::SIDE_H)} else {egui::vec2(app::WIN_W,app::WIN_H)};
+                let win = egui::Rect::from_min_size(ui.max_rect().min,size);
                 out = Some(self.app.frame(ui, win, &env));
             });
         let Some(out) = out else { return };
@@ -344,22 +482,56 @@ impl eframe::App for Shell {
             // 保留主窗口的事件循环，避免全屏隐藏后设置窗口无法关闭或重新打开。
             let region=if self.hidden {(0.0,0.0,0.0,0.0)} else {r(out.region)};
             let hit=if self.hidden {(0.0,0.0,0.0,0.0)} else {r(out.hit)};
-            native.update(region, hit, if self.hidden{None}else{out.notice_hit.map(r)},if self.hidden{None}else{out.file_drop_zone.map(r)},ctx.pixels_per_point(), out.editing, !self.hidden && out.expanded);
+            native.update(region, hit, if self.hidden{None}else{out.notice_hit.map(r)},if self.hidden{None}else{out.file_drop_zone.map(r)},if self.hidden{None}else{out.glass.as_deref()},(ctx.pixels_per_point()*eframe::root_frame_paint_scale()), out.editing, !self.hidden && out.expanded);
         }
         for cmd in out.cmds {
             match cmd {
                 Cmd::Media(t) => {
                     let source=self.media.lock().map(|media|media.source.clone()).unwrap_or_default();
-                    if let smtc::Transport::Seek(seconds)=t {
-                        let (tx,rx)=std::sync::mpsc::channel();self.seek_rx=Some(rx);
-                        let ctx=ctx.clone();
-                        std::thread::spawn(move || {let _=tx.send(smtc::seek(seconds,&source));ctx.request_repaint();});
-                    }else{std::thread::spawn(move || smtc::control(t,&source));}
+                    if self.media_control.is_none(){self.media_control=smtc::ControlWorker::start(ctx.clone());}
+                    match self.media_control.as_ref().ok_or(()).and_then(|worker|worker.submit(t,source)){
+                        Ok(Some(rx))=>self.seek_rx=Some(rx),Ok(None)=>{},Err(())=>self.app.say("播放器正在响应，请稍后重试"),
+                    }
+                }
+                Cmd::ViewMessenger(unread)=>{
+                    #[cfg(windows)] match daozai::wechat::open_unread(unread){
+                        Ok(())=>{
+                            match daozai::wechat::foreground_client(&[unread.source]){
+                                Some((source,pid))=>self.app.viewed_client(source,pid),
+                                None=>{self.opening_messenger=Some((unread,Instant::now()));ctx.request_repaint_after(Duration::from_secs(4));}
+                            }
+                        },
+                        Err(_) if self.app.settings.wechat_tray_open && unread.source==app::Messenger::Wechat && self.tray_opening.is_none()=>{
+                            match daozai::wechat::wechat_in_tray(unread){
+                                Ok(())=>{
+                                    // 缩在托盘：后台线程按下该账号的托盘按钮，不阻塞界面。
+                                    let (tx,rx)=std::sync::mpsc::channel();let repaint=ctx.clone();
+                                    std::thread::spawn(move||{let _=tx.send(daozai::wechat::open_wechat_from_tray(unread));repaint.request_repaint();});
+                                    self.tray_opening=Some((unread,rx));
+                                }
+                                Err(error)=>self.app.say(error),
+                            }
+                        }
+                        Err(error)=>self.app.say(error),
+                    }
                 }
                 Cmd::Open(p) => {if let Err(e)=open_path(&p){self.app.say(e);}},
                 Cmd::OpenUrl(url)=>{
                     if let Some(url)=daozai::mail::web_url(&url) {
                         if open_path(std::path::Path::new(&url)).is_err(){self.app.say("无法打开默认浏览器，请检查 Windows 默认应用设置");}
+                    }
+                },
+                Cmd::CalendarImport=>{
+                    #[cfg(windows)] match daozai::system::pick_files_for("选择要导入的日历文件（.ics）",true){
+                        Ok(files)=>if !files.is_empty(){
+                            let read:Vec<(String,String)>=files.iter().map(|path|{
+                                let name=path.file_name().map(|n|n.to_string_lossy().to_string()).unwrap_or_default();
+                                let text=std::fs::read(path).ok().filter(|raw|raw.len()<=20*1024*1024).map(|raw|String::from_utf8_lossy(&raw).into_owned()).unwrap_or_default();
+                                (name,text)
+                            }).collect();
+                            let note=self.app.import_ics(&read);self.app.say(note);
+                        },
+                        Err(e)=>self.app.say(format!("无法选择文件：{}",e.code())),
                     }
                 },
                 Cmd::AddFiles=>{
@@ -399,8 +571,8 @@ impl eframe::App for Shell {
                     #[cfg(windows)] if let Some(tray)=&self.tray{tray.notify(&title,&body);}
                 },
                 Cmd::Chime(style,volume)=>{daozai::chime::play(style,volume);},
-                Cmd::RequestNotifications=>{
-                    #[cfg(windows)] {self.app.settings.read_notifications=true;self.app.settings.save();self.incoming=None;match daozai::system::connect(){Ok(rx)=>{self.incoming=Some(rx);self.app.listener_status="正在请求 Windows 通知权限…".into();},Err(e)=>self.app.listener_status=format!("Windows 未允许读取通知：{}。需要相应的系统权限或应用身份。",e.code())}}
+                cmd @ (Cmd::RequestNotifications|Cmd::RequestQqNotifications)=>{
+                    #[cfg(windows)] {self.app.settings.qq_only=matches!(cmd,Cmd::RequestQqNotifications);self.app.settings.read_notifications=true;self.app.settings.save();self.incoming=None;match daozai::system::connect(ctx.clone(),self.app.settings.qq_only){Ok(rx)=>{self.incoming=Some(rx);self.app.listener_status="正在请求 Windows 通知权限…".into();},Err(e)=>self.app.listener_status=format!("Windows 未允许读取通知：{}。需要相应的系统权限或应用身份。",e.code())}}
                 },
                 Cmd::MailSync=>{
                     let enabled=self.app.settings.mail_enabled;
@@ -575,5 +747,5 @@ fn run() -> eframe::Result<()> {
         .with_always_on_top()
         .with_visible(false);
     let opts = eframe::NativeOptions { viewport, vsync: !cfg!(windows), ..Default::default() };
-    eframe::run_native("岛仔", opts, Box::new(|cc| Ok(Box::new(Shell::new(cc)))))
+    graphics::run(opts,|opts|eframe::run_native("岛仔", opts, Box::new(|cc| Ok(Box::new(Shell::new(cc))))))
 }

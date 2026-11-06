@@ -15,7 +15,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use crate::poll_clock::PollClock;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::{CreateRectRgn, DeleteObject, SetWindowRgn};
+use windows::Win32::Graphics::Gdi::{CombineRgn, CreatePolygonRgn, CreateRectRgn, CreateRoundRectRgn, DeleteObject, SetWindowRgn, HRGN, RGN_OR, WINDING};
 use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState,VK_LBUTTON,VK_RBUTTON};
@@ -62,10 +62,37 @@ impl DragCapture {
             *self=Self::default();
             return false;
         };
+        let inside=|(x,y):(i32,i32)|zone.is_some_and(|(l,t,r,b)|x>=l && x<r && y>=t && y<b);
         let origin=*self.origin.get_or_insert(cursor);
         self.moved|=(cursor.0-origin.0).abs()>threshold.0 || (cursor.1-origin.1).abs()>threshold.1;
-        self.moved && zone.is_some_and(|(l,t,r,b)|cursor.0>=l && cursor.0<r && cursor.1>=t && cursor.1<b)
+        // 只接收从感应区外拖进来的文件：在岛下方的标签栏里按下（含连续点击、拖标签、选文字）
+        // 不能扩大窗口区域，否则 HTTRANSPARENT 拦不住跨进程点击，下层窗口会点不动。
+        self.moved && !inside(origin) && inside(cursor)
     }
+}
+
+/// 拖文件进岛：拖放感应区只在每帧的 `update` 里检查，而岛静止时（没有吉祥物动画、
+/// 没有播放音乐，例如侧边停靠）一秒才画一帧，拖到岛上往往来不及扩大接收区域。
+/// 这里用一个几乎不占资源的小线程：每 80 ms 看一次鼠标键，只有按住且光标在岛的画布内时
+/// 才请求重绘，让感应区及时生效；平时不触发任何绘制。
+fn watch_drag(hwnd:HWND,ctx:eframe::egui::Context){
+    let raw=hwnd.0 as isize;
+    let mut was_down=false;
+    let _=std::thread::Builder::new().name("daozai-drag-watch".into()).spawn(move||loop{
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        unsafe {
+            let hwnd=HWND(raw as *mut _);
+            if !IsWindow(hwnd).as_bool(){return;}
+            let down=GetAsyncKeyState(VK_LBUTTON.0 as i32)<0 || GetAsyncKeyState(VK_RBUTTON.0 as i32)<0;
+            // 松开后补一帧，让拖放状态及时复位；否则静止时一秒才画一帧，连续点击会沿用上次的按下位置。
+            if was_down && !down {ctx.request_repaint();}
+            was_down=down;
+            if !down {continue;}
+            let mut cursor=POINT::default();let mut rect=RECT::default();
+            if GetCursorPos(&mut cursor).is_err() || GetWindowRect(hwnd,&mut rect).is_err(){continue;}
+            if cursor.x>=rect.left && cursor.x<rect.right && cursor.y>=rect.top && cursor.y<rect.bottom {ctx.request_repaint();}
+        }
+    });
 }
 
 // `WS_EX_LAYERED` 是 UpdateLayeredWindow 提交带逐像素 alpha 的 DIB 的前提。
@@ -94,6 +121,78 @@ fn enable_alpha_composition(hwnd:HWND)->windows::core::Result<()> {
         let _=DeleteObject(region);
         result
     }
+}
+
+// ---------- 毛玻璃：窗口区域 ----------
+//
+// 兼容后端（无逐像素透明）按轮廓裁剪窗口区域；毛玻璃的实时模糊见 `composition.rs`。
+
+/// 毛玻璃诊断：写到数据目录的 glass-diagnostics.txt（只记录状态变化，不会持续增长）。
+fn glass_diagnostic(message: &str) {
+    use std::io::Write;
+    let path = crate::model::config_dir().join("glass-diagnostics.txt");
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 64 * 1024) { let _ = std::fs::write(&path, b""); }
+    let transparency = {
+        use windows::{core::w, Win32::System::Registry::*};
+        let mut value = 1u32; let mut size = 4u32;
+        let ok = unsafe { RegGetValueW(HKEY_CURRENT_USER, w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"), w!("EnableTransparency"), RRF_RT_REG_DWORD, None, Some((&mut value as *mut u32).cast()), Some(&mut size)) }.is_ok();
+        if ok { if value != 0 { "开" } else { "关" } } else { "未知" }
+    };
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(file, "{} · {} · 系统透明效果：{}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), message, transparency);
+    }
+}
+
+/// 把逻辑坐标的轮廓换算成物理像素，作为去重的键和区域的输入。
+fn glass_key(shapes: &[crate::app::GlassShape], ppp: f32) -> Vec<i32> {
+    use crate::app::GlassShape;
+    let px = |v: f32| (v * ppp).round() as i32;
+    let mut key = Vec::new();
+    for shape in shapes {
+        match shape {
+            GlassShape::Outline(_) | GlassShape::Notch { .. } | GlassShape::Docked { .. } => {
+                let points = shape.outline();
+                key.push(-1);
+                key.push(points.len() as i32);
+                for p in &points { key.push(px(p.x)); key.push(px(p.y)); }
+            }
+            GlassShape::Round(r, radius) => {
+                key.extend([-2, px(r.left()), px(r.top()), px(r.right()), px(r.bottom()), px(*radius * 2.0)]);
+            }
+        }
+    }
+    key
+}
+
+/// 按 `glass_key` 的结果合成窗口区域（多块轮廓取并集）。
+unsafe fn glass_region(key: &[i32]) -> Option<HRGN> {
+    let mut out: Option<HRGN> = None;
+    let mut i = 0;
+    while i < key.len() {
+        let part = match key[i] {
+            -1 => {
+                let n = key[i + 1] as usize;
+                let points: Vec<POINT> = (0..n).map(|j| POINT { x: key[i + 2 + j * 2], y: key[i + 3 + j * 2] }).collect();
+                i += 2 + n * 2;
+                if points.len() < 3 { continue; }
+                CreatePolygonRgn(&points, WINDING)
+            }
+            _ => {
+                let (l, t, r, b, d) = (key[i + 1], key[i + 2], key[i + 3], key[i + 4], key[i + 5]);
+                i += 6;
+                CreateRoundRectRgn(l, t, r + 1, b + 1, d, d)
+            }
+        };
+        if part.0.is_null() { continue; }
+        match out {
+            None => out = Some(part),
+            Some(all) => {
+                let _ = CombineRgn(all, all, part, RGN_OR);
+                let _ = DeleteObject(part);
+            }
+        }
+    }
+    out
 }
 
 /// 命中区外 `HTTRANSPARENT`（鼠标投给下层窗口），命中区内 `HTCLIENT`。
@@ -221,9 +320,17 @@ pub struct Window {
     hook: HWINEVENTHOOK,
     browser_state: (Option<bool>,PollClock),
     drag_capture: DragCapture,
+    /// 当前生效的贴合轮廓（物理像素键）、毛玻璃的合成模糊层与其状态。
+    glass: Option<Vec<i32>>,
+    backdrop: Option<crate::composition::Backdrop>,
+    blur: bool,
+    blur_unavailable: bool,
+    opaque_surface: bool,
 }
 
 impl Window {
+    pub fn hwnd(&self)->HWND {self.hwnd}
+
     pub fn new(cc: &eframe::CreationContext<'_>) -> Option<Self> {
         let RawWindowHandle::Win32(handle) = cc.window_handle().ok()?.as_raw() else { return None };
         let hwnd = HWND(handle.hwnd.get() as *mut _);
@@ -243,19 +350,39 @@ impl Window {
                 WINEVENT_OUTOFCONTEXT,
             )
         };
-        Some(Self { hwnd, region: (0, 0, 0, 0), expanded: false, hook, browser_state:(None,PollClock::default()), drag_capture:DragCapture::default() })
+        // 区域用哨兵值：首帧（包括启动即隐藏的空区域）也必须真正调用 SetWindowRgn，
+        // 否则整块透明画布会挡住下层程序的点击。
+        let opaque_surface=cc.wgpu_render_state.as_ref().is_some_and(|state|state.adapter.get_info().backend==eframe::wgpu::Backend::Dx12);
+        watch_drag(hwnd,cc.egui_ctx.clone());
+        Some(Self { hwnd, region: (i32::MIN, 0, 0, 0), expanded: false, hook, browser_state:(None,PollClock::default()), drag_capture:DragCapture::default(), glass:None, backdrop:None, blur:false, blur_unavailable:false, opaque_surface })
     }
 
-    /// 使用目标屏幕的物理坐标定位，并在缩放或屏幕连接变化后重新校正。
-    pub fn place_on_display(&self, scale:f32, bounds:crate::display_layout::Bounds)->bool {
+    /// 使用目标屏幕的物理坐标定位，并在缩放、岛体大小、水平位置或屏幕连接变化后重新校正。
+    /// `scale` 是主窗口的实际像素比（系统 DPI × 岛体大小），画布按它同步调整物理尺寸。
+    pub fn place_on_display(&self, scale:f32, bounds:crate::display_layout::Bounds, offset:f32, dock:crate::model::Dock)->bool {
         unsafe {
-            let Some((x,y))=crate::display_layout::island_origin(bounds,crate::app::WIN_W,scale) else{return false;};
+            // 顶部：水平居中 + 水平偏移；左右：贴边 + 竖直偏移，画布换成竖向的大小。
+            let origin=if dock.is_side() {
+                crate::display_layout::side_origin(bounds,dock,(crate::side_dock::SIDE_W,crate::side_dock::SIDE_H),crate::side_dock::SIDE_HALF_EXTENT,scale,offset)
+            } else {crate::display_layout::island_origin_offset(bounds,crate::app::WIN_W,scale,offset)};
+            let Some((x,y))=origin else{return false;};
+            let (canvas_w,canvas_h)=if dock.is_side() {(crate::side_dock::SIDE_W,crate::side_dock::SIDE_H)} else {(crate::app::CANVAS_W,crate::app::WIN_H)};
+            let (w,h)=((canvas_w*scale).round() as i32,(canvas_h*scale).round() as i32);
             let mut current=RECT::default();
             if GetWindowRect(self.hwnd,&mut current).is_err(){return false;}
-            if (current.left,current.top)!=(x,y) && SetWindowPos(self.hwnd,None,x,y,0,0,SWP_NOSIZE|SWP_NOACTIVATE|SWP_NOZORDER).is_err(){return false;}
+            let moved=(current.left,current.top)!=(x,y);
+            let resized=(current.right-current.left,current.bottom-current.top)!=(w,h);
+            if moved||resized {
+                let flags=SWP_NOACTIVATE|SWP_NOZORDER|if resized{SET_WINDOW_POS_FLAGS(0)}else{SWP_NOSIZE};
+                if SetWindowPos(self.hwnd,None,x,y,w,h,flags).is_err(){return false;}
+            }
             true
         }
     }
+
+    /// 系统背景模糊是否正在生效（毛玻璃皮肤据此选择着色深浅）。
+    pub fn blur_active(&self)->bool {self.blur}
+    pub fn opaque_surface(&self)->bool {self.opaque_surface}
 
     pub fn logical_origin(&self,scale:f32)->Option<eframe::egui::Pos2>{
         let mut r=RECT::default();
@@ -277,6 +404,7 @@ impl Window {
         hit_rect: (f32, f32, f32, f32),
         notice_hit: Option<(f32,f32,f32,f32)>,
         file_drop_zone: Option<(f32,f32,f32,f32)>,
+        glass: Option<&[crate::app::GlassShape]>,
         ppp: f32,
         editing: bool,
         expanded: bool,
@@ -300,15 +428,69 @@ impl Window {
         let mut hits=vec![h];
         if let Some((x,y,w,h))=notice_hit {hits.push((px(x),px(y),px(x+w),px(y+h)));}
         *hit().lock().unwrap_or_else(|e| e.into_inner()) = hits;
-        if self.region != r {
-            unsafe {
-                let rgn = CreateRectRgn(r.0, r.1, r.2, r.3);
-                if SetWindowRgn(self.hwnd, rgn, true) != 0 {
-                    self.region = r;
-                } else {
-                    let _ = DeleteObject(rgn);
+        // 毛玻璃：合成引擎的模糊块贴合岛体轮廓，窗口区域仍用矩形（含阴影与拖放感应区）。
+        let _ = capture;
+        match glass.filter(|g|!g.is_empty() && !self.blur_unavailable && !self.opaque_surface) {
+            Some(shapes) => {
+                if self.backdrop.is_none() {
+                    match crate::composition::Backdrop::new() {
+                        Ok(backdrop) => {
+                            glass_diagnostic("合成引擎模糊底板已创建");
+                            self.backdrop = Some(backdrop);
+                        }
+                        Err(error) => {
+                            glass_diagnostic(&format!("合成引擎模糊层创建失败：{error:?}"));
+                            self.blur_unavailable = true;
+                        }
+                    }
+                }
+                if let Some(backdrop) = &mut self.backdrop {
+                    match backdrop.show(self.hwnd, &crate::app::blur_pieces(shapes, ppp)) {
+                        Ok(()) => self.blur = true,
+                        Err(error) => {
+                            glass_diagnostic(&format!("模糊层更新失败：{error:?}"));
+                            backdrop.hide();
+                            self.blur = false;
+                            self.blur_unavailable = true;
+                        }
+                    }
                 }
             }
+            None => {
+                if let Some(backdrop) = &mut self.backdrop { backdrop.hide(); }
+                self.blur = false;
+            }
+        }
+        // DX12 的普通窗口表面没有 alpha 合成，只有它需要按轮廓裁剪窗口区域。
+        match glass.filter(|_|self.opaque_surface) {
+            Some(shapes) => {
+                let key=glass_key(shapes,ppp);
+                if self.glass.as_ref()!=Some(&key) {
+                    unsafe {
+                        if let Some(rgn)=glass_region(&key) {
+                            if SetWindowRgn(self.hwnd, rgn, true) != 0 {
+                                self.glass=Some(key);
+                                // 回到矩形区域时必须重新设置。
+                                self.region=(i32::MIN,0,0,0);
+                            } else {
+                                let _ = DeleteObject(rgn);
+                            }
+                        }
+                    }
+                }
+            }
+            None if self.region != r || self.glass.is_some() => {
+                unsafe {
+                    let rgn = CreateRectRgn(r.0, r.1, r.2, r.3);
+                    if SetWindowRgn(self.hwnd, rgn, true) != 0 {
+                        self.region = r;
+                        self.glass=None;
+                    } else {
+                        let _ = DeleteObject(rgn);
+                    }
+                }
+            }
+            None => {}
         }
         unsafe { apply_style(self.hwnd, editing, expanded && !self.expanded) };
         self.expanded = expanded;
@@ -331,11 +513,66 @@ mod tests {
     use super::*;
 
     #[test]
+    fn opaque_surface_clips_black_background_even_without_system_blur(){
+        use windows::Win32::Graphics::Gdi::{GetWindowRgn,PtInRegion};
+        unsafe {
+            let hwnd=CreateWindowExW(WS_EX_TOOLWINDOW,windows::core::w!("STATIC"),windows::core::w!(""),WS_POPUP,-10000,-10000,400,200,None,None,None,None).unwrap();
+            let saved=hit().lock().unwrap_or_else(|e|e.into_inner()).clone();
+            {
+                let mut native=Window{hwnd,region:(0,0,0,0),expanded:false,hook:HWINEVENTHOOK::default(),browser_state:(None,PollClock::now()),drag_capture:DragCapture::default(),glass:None,backdrop:None,blur:false,blur_unavailable:true,opaque_surface:true};
+                let shapes=[crate::app::GlassShape::Round(eframe::egui::Rect::from_min_max(eframe::egui::pos2(80.0,60.0),eframe::egui::pos2(320.0,160.0)),25.0)];
+                native.update((0.0,0.0,400.0,200.0),(80.0,60.0,240.0,100.0),None,None,Some(&shapes),1.0,false,false);
+                let region=CreateRectRgn(0,0,0,0);
+                GetWindowRgn(hwnd,region);
+                assert!(PtInRegion(region,200,100).as_bool());
+                assert!(!PtInRegion(region,10,10).as_bool(),"兼容后端不能保留画布上的黑色背景");
+                assert!(!PtInRegion(region,81,61).as_bool(),"圆角外侧必须透出桌面");
+                assert!(!native.blur);
+                native.update((0.0,0.0,0.0,0.0),(0.0,0.0,0.0,0.0),None,None,None,1.0,false,false);
+                GetWindowRgn(hwnd,region);
+                assert!(!PtInRegion(region,200,100).as_bool(),"隐藏时不能留下上一帧轮廓");
+                let _=DeleteObject(region);
+            }
+            *hit().lock().unwrap_or_else(|e|e.into_inner())=saved;
+            let _=DestroyWindow(hwnd);
+        }
+    }
+
+    #[test]
+    fn glass_region_follows_the_island_outline_instead_of_its_bounding_box(){
+        use crate::app::GlassShape;
+        use eframe::egui::{pos2,Rect};
+        use windows::Win32::Graphics::Gdi::PtInRegion;
+        let outline=crate::shape::outline(Rect::from_min_max(pos2(100.0,0.0),pos2(300.0,60.0)),5.0,8.0,20.0);
+        let shapes=[GlassShape::Outline(outline),GlassShape::Round(Rect::from_min_max(pos2(320.0,0.0),pos2(360.0,30.0)),10.0)];
+        let key=glass_key(&shapes,1.5);
+        assert_eq!(key,glass_key(&shapes,1.5),"同一帧轮廓的键必须稳定，避免每帧重设区域");
+        assert_ne!(key,glass_key(&shapes,1.25));
+        unsafe {
+            let rgn=glass_region(&key).expect("轮廓应能生成区域");
+            assert!(PtInRegion(rgn,300,45).as_bool(),"岛体中央在区域内");
+            assert!(!PtInRegion(rgn,152,88).as_bool(),"底部圆角外侧不能出现模糊");
+            assert!(PtInRegion(rgn,510,20).as_bool(),"通知详情等圆角块也在区域内");
+            assert!(!PtInRegion(rgn,470,20).as_bool(),"两块之间保持透明");
+            let _=DeleteObject(rgn);
+        }
+    }
+
+    #[test]
     fn drag_capture_ignores_clicks_and_pointer_jitter() {
         let mut capture=DragCapture::default();let zone=Some((110,0,530,120));
         assert!(!capture.update(true,Some((300,60)),zone,(4,4)),"感应区内按下不能直接扩大窗口");
         assert!(!capture.update(true,Some((302,61)),zone,(4,4)),"点击时的小幅抖动不算拖动");
         assert!(!capture.update(false,Some((302,61)),zone,(4,4)));
+    }
+
+    #[test]
+    fn drag_capture_ignores_repeated_clicks_below_the_island_without_an_observed_release() {
+        // 极简模式一秒才画一帧：两次点击之间可能没有一帧看到松开。
+        let mut capture=DragCapture::default();let zone=Some((110,0,530,120));
+        assert!(!capture.update(true,Some((200,60)),zone,(4,4)));
+        assert!(!capture.update(true,Some((380,60)),zone,(4,4)),"在岛下方连续点击不同标签不能被当成拖文件");
+        assert!(!capture.update(true,Some((300,30)),zone,(4,4)),"在感应区内拖动标签或选文字也不能扩大窗口");
     }
 
     #[test]
@@ -374,8 +611,8 @@ mod tests {
             assert!(above(cover.0,island.0),"先复现其他窗口盖住岛体");
             let foreground=GetForegroundWindow();
             let saved=hit().lock().unwrap_or_else(|e|e.into_inner()).clone();
-            let mut native=Window{hwnd:island.0,region:(0,0,0,0),expanded:false,hook:HWINEVENTHOOK::default(),browser_state:(None,PollClock::now()),drag_capture:DragCapture::default()};
-            let update=|native:&mut Window,expanded|native.update((0.0,0.0,416.0,140.0),(0.0,0.0,416.0,140.0),None,None,1.0,false,expanded);
+            let mut native=Window{hwnd:island.0,region:(0,0,0,0),expanded:false,hook:HWINEVENTHOOK::default(),browser_state:(None,PollClock::now()),drag_capture:DragCapture::default(),glass:None,backdrop:None,blur:false,blur_unavailable:false,opaque_surface:false};
+            let update=|native:&mut Window,expanded|native.update((0.0,0.0,416.0,140.0),(0.0,0.0,416.0,140.0),None,None,None,1.0,false,expanded);
             update(&mut native,true);
             assert!(above(island.0,cover.0),"展开时必须重新抬高实际窗口层级，不能只检查置顶标记");
             assert_eq!(GetForegroundWindow(),foreground,"悬停展开不能抢走当前应用的输入焦点");

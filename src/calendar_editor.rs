@@ -25,6 +25,38 @@ impl App {
         })();
         if let Err(error)=result{draft.error=error;self.calendar.draft=Some(draft);}
     }
+    /// 导入 .ics 文件到本机日程：过去 30 天到未来一年，重复日程展开；同一日程再次导入会跳过。
+    pub fn import_ics(&mut self,files:&[(String,String)])->String{
+        if !self.calendar.local_error.is_empty(){return self.calendar.local_error.clone();}
+        let now=chrono::Utc::now();
+        let (lo,hi)=(now-chrono::Duration::days(30),now+chrono::Duration::days(366));
+        let mut entries=self.calendar.local.clone();
+        let mut known:std::collections::HashSet<_>=entries.iter().map(|entry|entry.event.uid.clone()).collect();
+        let (mut added,mut skipped,mut errors)=(0usize,0usize,Vec::new());
+        for (name,text) in files {
+            match crate::calendar::events_from_ics(text,lo,hi) {
+                Ok(events)=>for mut event in events {
+                    if entries.len()>=5000 {skipped+=1;continue;}
+                    event.uid=format!("ics-{}-{}",event.uid,event.start);
+                    if !known.insert(event.uid.clone()){skipped+=1;continue;}
+                    let end=event.end.filter(|end|*end>event.start).unwrap_or(event.start+if event.all_day{86400}else{3600});
+                    event.end=Some(end);
+                    let reminder=(!event.all_day).then_some(15);
+                    entries.push(local_calendar::Entry{event,reminder});added+=1;
+                },
+                Err(error)=>errors.push(format!("{name}：{error}")),
+            }
+        }
+        if added>0 {
+            if let Err(error)=local_calendar::save(&entries){return error;}
+            self.calendar.local=entries;
+        }
+        let mut note=if added>0{format!("已导入 {added} 个日程")}else if errors.is_empty(){"文件里没有可导入的日程（只导入过去 30 天到未来一年）".into()}else{String::new()};
+        if skipped>0{note.push_str(&format!("，{skipped} 个已存在已跳过"));}
+        if !errors.is_empty(){if !note.is_empty(){note.push('；');}note.push_str(&errors.join("；"));}
+        self.calendar.import_note=note.clone();
+        note
+    }
     fn delete_calendar_editor(&mut self){
         let Some(draft)=self.calendar.draft.as_mut() else{return;};
         let Some(uid)=draft.uid.as_ref() else{return;};
@@ -42,6 +74,7 @@ impl App {
         let Some(d)=self.calendar.draft.as_mut() else{return;};
         let accent=Color32::from_rgb(82,162,255);
         c.centered_text(43.0,20.0,if d.uid.is_some(){"编辑日程"}else{"新建日程"},13.0,W::Semibold,theme::WHITE,H::Left);
+        c.centered_text(370.0,20.0,"仅保存在本机",9.0,W::Regular,theme::GRAY,H::Right);
         for (label,y) in [("名称",49.0),("开始",82.0),("结束",114.0),("提醒",147.0)]{c.centered_text(43.0,y,label,10.0,W::Regular,theme::GRAY,H::Left);}
         for (x,y,w) in [(86.0,38.0,284.0),(86.0,71.0,120.0),(86.0,103.0,120.0)]{c.fill(x,y,w,23.0,6.0,theme::CARD);}
         if !d.all_day {for y in [71.0,103.0]{c.fill(214.0,y,66.0,23.0,6.0,theme::CARD);}}
@@ -57,7 +90,7 @@ impl App {
             b.centered_text(x+width/2.0,146.5,label,8.4,W::Regular,theme::WHITE,H::Center);
             if r.clicked(){d.reminder=value;}
         }
-        let message=if d.error.is_empty(){"本机保存 · 日期 年-月-日 · 时间 时:分"}else{&d.error};
+        let message=if d.error.is_empty(){"日期 年-月-日 · 时间 时:分"}else{&d.error};
         c.centered_text(86.0,172.0,&c.fit(message,9.0,W::Regular,284.0),9.0,W::Regular,if d.error.is_empty(){theme::GRAY}else{theme::RED},H::Left);
         let mut delete=false;
         if d.uid.is_some(){
@@ -68,7 +101,7 @@ impl App {
         let (cancel,b)=paint::capsule(c,224.0,188.0,64.0,22.0,"calendar-editor-cancel",theme::BTN,theme::BTN_HOVER);
         b.centered_text(256.0,199.0,"取消",10.0,W::Regular,theme::WHITE,H::Center);
         let (save,b)=paint::capsule(c,298.0,188.0,72.0,22.0,"calendar-editor-save",accent,Color32::from_rgb(110,180,255));
-        b.centered_text(334.0,199.0,"保存",10.0,W::Semibold,theme::WHITE,H::Center);
+        b.centered_text(334.0,199.0,"保存到本机",10.0,W::Semibold,theme::WHITE,H::Center);
         if delete{self.delete_calendar_editor();}else if cancel.clicked(){self.calendar.draft=None;}else if save.clicked(){self.save_calendar_editor();}
     }
     pub(crate) fn calendar_editor_inputs(&mut self,ui:&mut egui::Ui,origin:egui::Pos2,cmds:&mut Vec<Cmd>){

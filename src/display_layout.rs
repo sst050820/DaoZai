@@ -45,6 +45,97 @@ pub fn island_origin(m:Bounds, island_width:f32, scale:f32)->Option<(i32,i32)> {
     Some((x.clamp(i32::MIN as f64,i32::MAX as f64) as i32,m.top))
 }
 
+/// 岛体可见内容（展开面板、肩部与阴影）距中心的最大半宽，逻辑点。
+/// 水平偏移以此为界，保证展开后面板仍完整留在屏幕内。
+pub const ISLAND_HALF_EXTENT: f32 = 240.0;
+
+/// 岛体中心能离开屏幕中线的最大距离（物理像素）。屏幕太窄时为 0，只能居中。
+pub fn island_travel(m:Bounds, scale:f32)->f64 {
+    if m.right<=m.left || !scale.is_finite() || scale<=0.0 {return 0.0;}
+    ((m.right as f64-m.left as f64)/2.0-ISLAND_HALF_EXTENT as f64*scale as f64).max(0.0)
+}
+
+/// 按水平偏移定位：`offset` 为 -1（最左）..0（居中）..1（最右），按可移动范围的比例换算，
+/// 所以换屏、改系统缩放或调整岛体大小后仍保持相同的相对位置。
+pub fn island_origin_offset(m:Bounds, island_width:f32, scale:f32, offset:f32)->Option<(i32,i32)> {
+    let (x,y)=island_origin(m,island_width,scale)?;
+    let offset=if offset.is_finite(){offset.clamp(-1.0,1.0)}else{0.0};
+    let shift=(island_travel(m,scale)*offset as f64).round();
+    Some(((x as f64+shift).clamp(i32::MIN as f64,i32::MAX as f64) as i32,y))
+}
+
+/// 左右停靠：画布贴着屏幕左 / 右边，竖直方向按 `offset`（-1 最上 … 0 居中 … 1 最下）移动，
+/// 可移动范围保证展开面板始终完整留在屏幕内。返回画布左上角（物理像素）。
+pub fn side_origin(m:Bounds, dock:crate::model::Dock, canvas:(f32,f32), half_extent:f32, scale:f32, offset:f32)->Option<(i32,i32)> {
+    if m.right<=m.left || m.bottom<=m.top || !scale.is_finite() || scale<=0.0 {return None;}
+    let (w,h)=((canvas.0*scale) as f64,(canvas.1*scale) as f64);
+    let offset=if offset.is_finite(){offset.clamp(-1.0,1.0)}else{0.0} as f64;
+    let travel=((m.bottom as f64-m.top as f64)/2.0-(half_extent*scale) as f64).max(0.0);
+    let cy=(m.top as f64+m.bottom as f64)/2.0+travel*offset;
+    let x=match dock {crate::model::Dock::Right=>m.right as f64-w,_=>m.left as f64};
+    Some((x.round() as i32,(cy-h/2.0).round() as i32))
+}
+
+#[cfg(test)]
+mod side_tests {
+    use super::*;
+    use crate::model::Dock;
+    #[test]
+    fn side_canvas_hugs_the_edge_and_keeps_the_panel_on_screen(){
+        for (m,scale) in [(Bounds{left:0,top:0,right:1920,bottom:1080},1.0),(Bounds{left:-2560,top:-400,right:0,bottom:1040},1.5)] {
+            let canvas=(500.0,600.0);
+            let (x,_)=side_origin(m,Dock::Left,canvas,150.0,scale,0.0).unwrap();assert_eq!(x,m.left);
+            let (x,_)=side_origin(m,Dock::Right,canvas,150.0,scale,0.0).unwrap();assert_eq!(x+(500.0*scale) as i32,m.right);
+            for offset in [-1.0,0.0,1.0,7.0] {
+                let (_,y)=side_origin(m,Dock::Left,canvas,150.0,scale,offset).unwrap();
+                let cy=y as f64+300.0*scale as f64;
+                assert!(cy-150.0*scale as f64>=m.top as f64-1.0 && cy+150.0*scale as f64<=m.bottom as f64+1.0,"{m:?} {offset}");
+            }
+            let (_,center)=side_origin(m,Dock::Left,canvas,150.0,scale,0.0).unwrap();
+            assert_eq!(center as f64+300.0*scale as f64,(m.top+m.bottom) as f64/2.0);
+        }
+        assert!(side_origin(Bounds{left:0,top:0,right:0,bottom:0},Dock::Left,(500.0,600.0),150.0,1.0,0.0).is_none());
+    }
+}
+
+#[cfg(test)]
+mod offset_tests {
+    use super::*;
+    #[test]
+    fn centered_offset_matches_the_original_origin(){
+        let m=Bounds{left:-2560,top:-400,right:0,bottom:1040};
+        for scale in [1.0,1.25,1.5,2.0] {assert_eq!(island_origin_offset(m,640.0,scale,0.0),island_origin(m,640.0,scale));}
+    }
+    #[test]
+    fn extreme_offsets_keep_the_expanded_panel_on_screen(){
+        for (m,scale) in [
+            (Bounds{left:0,top:0,right:1920,bottom:1080},1.0),
+            (Bounds{left:-2560,top:-400,right:0,bottom:1040},1.5),
+            (Bounds{left:1920,top:200,right:3840,bottom:1280},1.25*1.4),
+        ] {
+            for offset in [-1.0,1.0,-5.0,5.0] {
+                let (x,_)=island_origin_offset(m,640.0,scale,offset).unwrap();
+                let center=x as f64+320.0*scale as f64;
+                let half=(ISLAND_HALF_EXTENT*scale) as f64;
+                assert!(center-half>=m.left as f64-1.0 && center+half<=m.right as f64+1.0,"{m:?} {scale} {offset}");
+            }
+            let left=island_origin_offset(m,640.0,scale,-1.0).unwrap().0;
+            let right=island_origin_offset(m,640.0,scale,1.0).unwrap().0;
+            let center=island_origin(m,640.0,scale).unwrap().0;
+            assert!(left<center && center<right);
+            assert!(((center-left)-(right-center)).abs()<=1,"左右对称");
+        }
+    }
+    #[test]
+    fn narrow_screens_and_bad_values_stay_centered(){
+        let narrow=Bounds{left:0,top:0,right:400,bottom:800};
+        assert_eq!(island_travel(narrow,1.5),0.0);
+        assert_eq!(island_origin_offset(narrow,640.0,1.5,1.0),island_origin(narrow,640.0,1.5));
+        let m=Bounds{left:0,top:0,right:1920,bottom:1080};
+        assert_eq!(island_origin_offset(m,640.0,1.0,f32::NAN),island_origin(m,640.0,1.0));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

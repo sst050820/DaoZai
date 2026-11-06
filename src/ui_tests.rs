@@ -700,7 +700,7 @@ fn failed_lyrics_can_be_retried_from_the_music_page(){
     h.app.ly.key="Track|Artist|120".into();
     h.app.ly.error=Some(crate::lyrics::FetchError::Unavailable("HTTP 502".into()));
     h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
-    assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()=="歌词服务暂不可用")),"展开内应保留歌词错误提示");
+    assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()=="暂未获取歌词，请重试")),"展开内应保留歌词错误提示");
     h.click(H::local(310.0,68.0));
     assert!(h.app.ly.key.is_empty(),"点击错误提示后应允许重新请求当前歌曲");
 }
@@ -1263,7 +1263,7 @@ fn wheel_navigation_reaches_every_page_in_both_directions(){
 #[test]
 fn wheel_scrolls_lists_only_inside_content_and_leaves_at_the_edge(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
-    h.app.todos.items=(0..4).map(|i|crate::model::TodoItem{text:format!("任务 {i}"),done_on:None,due:None,reminded:false}).collect();
+    h.app.todos.items=(0..4).map(|i|crate::model::TodoItem{text:format!("任务 {i}"),done_on:None,due:None,reminded:false,repeat:0,reminded_on:None}).collect();
     h.app.shelf.items=(0..6).map(|i|std::path::PathBuf::from(format!("scroll-test-{i}.txt"))).collect();
     for page in [3,4] {
         h.app.show_page(page);h.hover(H::local(300.0,60.0),1.0);
@@ -1323,15 +1323,20 @@ fn resident_quotas_coexist_with_music_and_focus(){
 }
 
 #[test]
-fn resident_overflow_stays_clear_of_clock_and_opens_all_accounts(){
+fn resident_fifth_account_stays_clear_of_clock_and_opens(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.app.settings.pet=false;h.app.settings.show_battery=false;h.quota_accounts(5);
     for _ in 0..90 {h.frame(vec![]);}
+    // 本版本保留自建额度实现：收起栏固定显示 3 个圆环，其余账号在额度页切换，
+    // 不引入上游的动态第 4/5 槽与「+N」溢出标记。
+    assert_eq!(h.app.quota.config.accounts.len(),5);
+    let centers=h.quota_centers();
+    assert_eq!(centers.len(),3,"常驻栏仍应只显示 3 个额度圆环");
     let text_rect=|label:&str|h.shapes.iter().find_map(|shape|match &shape.shape{
         egui::Shape::Text(text) if text.galley.text()==label=>Some(text.visual_bounding_rect()),_=>None,
     }).expect("常驻文字应可见");
-    let more=text_rect("+2");let clock=text_rect("09:41");
-    assert!(more.right()+8.0<clock.left(),"更多账号计数不能挤占时钟");
-    h.click(more.center());assert_eq!(h.app.page(),6);assert_eq!(h.app.quota.config.accounts.len(),5);
+    let last=*centers.last().unwrap();
+    assert!(last+13.5+8.0<text_rect("09:41").left(),"多账号布局不能挤占时钟");
+    h.click(Pos2::new(last,15.0));assert_eq!(h.app.page(),6,"点击圆环应进入额度页查看全部账号");
 }
 
 #[test]
@@ -1633,7 +1638,7 @@ fn mail_row_opens_summary_and_back_returns() {
 fn empty_todo_draft_can_be_cancelled_by_clicking_elsewhere(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     for text in ["","   "]{
-        let mut h=H::new();h.app.todos.items=vec![crate::model::TodoItem{text:"保留任务".into(),due:None,done_on:None,reminded:false}];h.app.todos.save();
+        let mut h=H::new();h.app.todos.items=vec![crate::model::TodoItem{text:"保留任务".into(),due:None,done_on:None,reminded:false,repeat:0,reminded_on:None}];h.app.todos.save();
         h.app.show_page(4);h.hover(H::local(300.0,60.0),1.0);h.click(H::local(70.0,109.0));
         assert!(h.app.adding,"点击添加后应保留空白输入框");
         if !text.is_empty(){h.frame(vec![egui::Event::Text(text.into())]);}
@@ -1884,7 +1889,7 @@ fn mascot_reacts_to_music_and_respects_focus(){
 #[test]
 fn mascot_keeps_task_celebration_until_panel_closes(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.frame(vec![]);
-    h.app.todos.items.push(crate::model::TodoItem{text:"完成测试任务".into(),done_on:None,due:None,reminded:false});
+    h.app.todos.items.push(crate::model::TodoItem{text:"完成测试任务".into(),done_on:None,due:None,reminded:false,repeat:0,reminded_on:None});
     h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);h.app.go(4,1.0);h.hover(H::local(300.0,60.0),1.0);h.click(H::local(250.0,47.0));
     assert!(h.app.todos.items[0].done_on.is_some());
     h.hover(H::local(300.0,60.0),4.0);assert_eq!(format!("{:?}",h.app.pet_state()),"Happy");
@@ -1974,7 +1979,7 @@ fn mascot_expression_gallery(){
 #[test]
 fn todo_due_roundtrip_and_fires_only_once(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
-    h.app.todos.items.push(crate::model::TodoItem{text:"会议 | 准备".into(),done_on:None,due:Some("2026-10-28 09:40".into()),reminded:false});h.app.todos.save();
+    h.app.todos.items.push(crate::model::TodoItem{text:"会议 | 准备".into(),done_on:None,due:Some("2026-10-28 09:40".into()),reminded:false,repeat:0,reminded_on:None});h.app.todos.save();
     let loaded=crate::model::TodoList::load();assert_eq!(loaded.items[0].text,"会议 | 准备");assert_eq!(loaded.items[0].due.as_deref(),Some("2026-10-28 09:40"));
     h.frame(vec![]);assert!(h.app.todos.items[0].reminded);let n=h.cmds.len();h.frame(vec![]);assert_eq!(n,h.cmds.len());assert!(crate::model::TodoList::load().items[0].reminded);
 }
@@ -2026,7 +2031,7 @@ fn focus_completion_offers_starting_the_break(){
 #[test]
 fn task_editor_saves_and_cancels_inside_island(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
-    h.app.todos.items.push(crate::model::TodoItem{text:"准备会议".into(),done_on:None,due:None,reminded:false});h.app.go(4,1.0);h.hover(H::local(300.0,60.0),0.8);h.app.open_task_dialog(0);
+    h.app.todos.items.push(crate::model::TodoItem{text:"准备会议".into(),done_on:None,due:None,reminded:false,repeat:0,reminded_on:None});h.app.go(4,1.0);h.hover(H::local(300.0,60.0),0.8);h.app.open_task_dialog(0);
     h.hover(H::local(300.0,60.0),0.2);assert!(h.app.is_editing());h.click(H::local(326.0,110.0));assert!(!h.app.is_editing());assert_eq!(h.app.todos.items[0].text,"准备会议");
     h.app.open_task_dialog(0);h.frame(vec![egui::Event::Key{key:egui::Key::Escape,physical_key:None,pressed:true,repeat:false,modifiers:Default::default()}]);assert!(!h.app.is_editing());
 }
@@ -2304,8 +2309,18 @@ fn display_choice_saves_and_keeps_disconnected_selection(){
         let root=h.ctx.run(egui::RawInput{time:Some(time),..Default::default()},|ctx|h.app.settings_ui(ctx,false));let child=output.lock().unwrap().take().unwrap();
         raster.update_textures(&root.textures_delta);raster.update_textures(&child.textures_delta);h.shapes=child.shapes;
     }
+    // 设置页内容超过一屏时先向下滚动，直到目标完整出现在窗口内。
+    fn reveal(h:&mut H,raster:&mut crate::preview_raster::Raster,label:&str)->Option<Rect>{
+        let find=|h:&H|h.shapes.iter().find_map(|s|match &s.shape{egui::Shape::Text(t)if t.galley.text()==label=>Some(t.visual_bounding_rect()),_=>None}).filter(|r|r.bottom()<550.0);
+        for _ in 0..20 {
+            if let Some(r)=find(h){return Some(r);}
+            frame(h,raster,vec![egui::Event::PointerMoved(Pos2::new(450.0,300.0)),egui::Event::MouseWheel{unit:egui::MouseWheelUnit::Point,delta:Vec2::new(0.0,-60.0),modifiers:Default::default()}]);
+            for _ in 0..6{frame(h,raster,vec![]);}
+        }
+        find(h)
+    }
     fn click(h:&mut H,raster:&mut crate::preview_raster::Raster,label:&str){
-        let pos=h.shapes.iter().find_map(|s|match &s.shape{egui::Shape::Text(t)if t.galley.text()==label=>Some(t.visual_bounding_rect().center()),_=>None}).unwrap_or_else(||panic!("未找到：{label}"));
+        let pos=reveal(h,raster,label).map(|r|r.center()).unwrap_or_else(||panic!("未找到：{label}"));
         for pressed in [true,false]{frame(h,raster,vec![egui::Event::PointerMoved(pos),egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed,modifiers:Default::default()}]);}
         frame(h,raster,vec![]);
     }
@@ -2319,6 +2334,7 @@ fn display_choice_saves_and_keeps_disconnected_selection(){
     click(&mut h,&mut raster,"显示器 2 · 外接屏");assert_eq!(h.app.settings.display_id,r"\\?\DISPLAY#external");
     assert_eq!(crate::model::Settings::load().display_id,h.app.settings.display_id);
     h.app.displays.pop();frame(&mut h,&mut raster,vec![]);
+    reveal(&mut h,&mut raster,"所选屏幕未连接");
     assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()=="所选屏幕未连接")));
     assert_eq!(crate::display_layout::selected(&h.app.displays,&h.app.settings.display_id).unwrap().id,"internal");
     click(&mut h,&mut raster,"所选屏幕未连接");click(&mut h,&mut raster,"跟随主屏");
@@ -2889,7 +2905,7 @@ fn language_notice_text_is_vertically_centered() {
 fn todo_notice_view_locates_the_reminded_task() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
-    h.app.todos.items=(0..7).map(|i|crate::model::TodoItem{text:format!("任务 {i}"),done_on:None,due:if i==6{Some("2026-10-28 09:40".into())}else{None},reminded:false}).collect();
+    h.app.todos.items=(0..7).map(|i|crate::model::TodoItem{text:format!("任务 {i}"),done_on:None,due:if i==6{Some("2026-10-28 09:40".into())}else{None},reminded:false,repeat:0,reminded_on:None}).collect();
     for _ in 0..60 {h.frame(vec![]);}
     h.click_text("查看");
     assert_eq!(h.app.page,4);
@@ -3012,7 +3028,7 @@ fn adding_a_todo_saves_content_then_offers_an_optional_reminder() {
 #[test]
 fn todo_clock_button_sets_a_reminder_without_completing_the_task() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
-    h.app.todos.items=vec![crate::model::TodoItem{text:"已有任务".into(),done_on:None,due:None,reminded:false}];
+    h.app.todos.items=vec![crate::model::TodoItem{text:"已有任务".into(),done_on:None,due:None,reminded:false,repeat:0,reminded_on:None}];
     h.app.show_page(4);h.hover(H::local(300.0,60.0),1.0);h.click(H::local(343.0,46.0));
     assert!(h.app.task_dialog.is_some(),"每项待办应有可见的提醒入口");
     assert!(h.app.todos.items[0].done_on.is_none(),"时钟入口不能同时勾选任务");
@@ -3050,7 +3066,7 @@ fn scrolling_mail_details_keeps_the_current_message_open() {
 #[test]
 fn todo_reminder_picker_is_embedded_in_the_island(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
-    h.app.todos.items=vec![crate::model::TodoItem{text:"准备会议".into(),done_on:None,due:None,reminded:false}];
+    h.app.todos.items=vec![crate::model::TodoItem{text:"准备会议".into(),done_on:None,due:None,reminded:false,repeat:0,reminded_on:None}];
     h.app.show_page(4);h.hover(H::local(300.0,60.0),1.0);
     h.ctx.set_embed_viewports(false);
     egui::Context::set_immediate_viewport_renderer(|_,_|panic!("待办提醒必须在岛内选择，不能创建独立窗口"));
@@ -3073,7 +3089,7 @@ fn todo_reminder_picker_is_embedded_in_the_island(){
 fn reminder_wheels_select_date_hour_and_minute_without_typing(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
     let day=chrono::Local::now().date_naive()+chrono::Duration::days(2);let original=format!("{day} 09:00");
-    h.app.todos.items=vec![crate::model::TodoItem{text:"准备方案".into(),due:Some(original.clone()),done_on:None,reminded:false}];
+    h.app.todos.items=vec![crate::model::TodoItem{text:"准备方案".into(),due:Some(original.clone()),done_on:None,reminded:false,repeat:0,reminded_on:None}];
     h.app.open_task_reminder(0);
     for x in [235.0,290.0,346.0] {h.hover(H::local(x,77.0),0.4);h.wheel(-40.0);}
     assert_eq!(h.app.todos.items[0].due,Some(original),"调整时不能提前写入提醒");
@@ -3087,7 +3103,7 @@ fn reminder_wheels_select_date_hour_and_minute_without_typing(){
 fn reminder_wheels_support_clicks_and_dragging(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
     let day=chrono::Local::now().date_naive()+chrono::Duration::days(2);
-    h.app.todos.items=vec![crate::model::TodoItem{text:"确认方案".into(),due:Some(format!("{day} 10:30")),done_on:None,reminded:false}];
+    h.app.todos.items=vec![crate::model::TodoItem{text:"确认方案".into(),due:Some(format!("{day} 10:30")),done_on:None,reminded:false,repeat:0,reminded_on:None}];
     h.app.open_task_reminder(0);h.hover(H::local(300.0,60.0),1.0);
     h.click(H::local(346.0,96.0));h.click(H::local(290.0,58.0));
     let start=H::local(235.0,77.0);h.cursor=Some(start);
@@ -3104,7 +3120,7 @@ fn reminder_wheels_support_clicks_and_dragging(){
 fn reminder_wheels_accumulate_small_trackpad_movements(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
     let day=chrono::Local::now().date_naive()+chrono::Duration::days(2);
-    h.app.todos.items=vec![crate::model::TodoItem{text:"检查进度".into(),due:Some(format!("{day} 10:30")),done_on:None,reminded:false}];
+    h.app.todos.items=vec![crate::model::TodoItem{text:"检查进度".into(),due:Some(format!("{day} 10:30")),done_on:None,reminded:false,repeat:0,reminded_on:None}];
     h.app.open_task_reminder(0);h.hover(H::local(346.0,77.0),1.0);
     for _ in 0..80{h.wheel(-0.5);}
     h.picker_click("完成");
@@ -3116,7 +3132,7 @@ fn reminder_wheels_accumulate_small_trackpad_movements(){
 fn reminder_picker_rejects_past_time_and_cancel_preserves_the_task(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
     let old=format!("{} 09:00",chrono::Local::now().date_naive()-chrono::Duration::days(1));
-    h.app.todos.items=vec![crate::model::TodoItem{text:"保留任务".into(),due:Some(old.clone()),done_on:None,reminded:true}];
+    h.app.todos.items=vec![crate::model::TodoItem{text:"保留任务".into(),due:Some(old.clone()),done_on:None,reminded:true,repeat:0,reminded_on:None}];
     h.app.open_task_reminder(0);h.picker_click("完成");h.picker_frame(vec![]);
     assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()=="请选择晚于当前的时间")));
     assert_eq!(h.app.todos.items[0].due,Some(old.clone()));
@@ -3151,7 +3167,7 @@ fn reminder_and_reader_layout_gallery(){
     let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_READER_PREVIEW_DIR").expect("需指定预览目录"));std::fs::create_dir_all(&dest).unwrap();
     for picker in [true,false]{
         let mut h=H::new();h.ctx.set_embed_viewports(true);
-        h.app.todos.items=vec![crate::model::TodoItem{text:"提交产品方案".into(),due:None,done_on:None,reminded:false}];h.app.open_task_reminder(0);
+        h.app.todos.items=vec![crate::model::TodoItem{text:"提交产品方案".into(),due:None,done_on:None,reminded:false,repeat:0,reminded_on:None}];h.app.open_task_reminder(0);
         let body=(1..=12).map(|n|format!("第 {n} 项 · 工作安排\n请确认需求与交付范围，整理设计方案和本周待办，并在评审前同步进度。相关意见请汇总后反馈给产品团队。\n\n")).collect::<String>();
         h.app.mail.reading=Some(crate::mail::Item {received_unix: None, account:"work@icloud.com".into(),from:"产品团队".into(),subject:"项目方案与下阶段工作安排".into(),time:"10-31 09:41".into(),code:None,summary:format!("各位好，\n\n以下是项目安排与交付要求，请逐项确认。\n\n{body}最后一段\n请在周五前确认，感谢配合。").into(),links:vec![crate::mail::Link{label:"查看项目资料".into(),url:"https://example.com/project".into()}],meeting:None,uid:42});
         let (w,height)=if picker{(WIN_W as u32,WIN_H as u32)}else{(700,620)};let ppp=1.5;
@@ -3174,7 +3190,7 @@ fn remove_icons_are_centered_in_their_buttons_at_each_scale(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     for scale in [1.0,1.25,1.5,2.0]{
         let mut h=H::new();h.ctx.set_pixels_per_point(scale);
-        h.app.todos.items=["第一项","第二项","第三项"].into_iter().map(|text|crate::model::TodoItem{text:text.into(),due:None,done_on:None,reminded:false}).collect();
+        h.app.todos.items=["第一项","第二项","第三项"].into_iter().map(|text|crate::model::TodoItem{text:text.into(),due:None,done_on:None,reminded:false,repeat:0,reminded_on:None}).collect();
         h.app.show_page(4);h.hover(H::local(300.0,60.0),1.0);
         for i in 0..3usize{
             let button=h.ctx.read_response(egui::Id::new(("card",true,("todo-delete",i)))).unwrap().rect;
@@ -3200,7 +3216,7 @@ fn ui_alignment_layout_gallery(){
     fn fixture()->H{
         let mut h=H::new();h.app.settings.pet=false;h.app.settings.island_lyrics=false;h.power=(Some(76),false);
         h.media=crate::smtc::NowPlaying{title:"愿每一个认真生活的人，都能在平凡的日子里找到属于自己的光".into(),artist:"The Lanterns · Live Session".into(),duration:240.0,position:65.0,playing:true,..Default::default()};
-        h.app.todos.items=["整理会议资料","Review design details","确认项目需求与下一阶段开发排期"].into_iter().map(|text|crate::model::TodoItem{text:text.into(),due:None,done_on:None,reminded:false}).collect();
+        h.app.todos.items=["整理会议资料","Review design details","确认项目需求与下一阶段开发排期"].into_iter().map(|text|crate::model::TodoItem{text:text.into(),due:None,done_on:None,reminded:false,repeat:0,reminded_on:None}).collect();
         h.app.shelf.items=["项目设计方案与交付说明.pdf","design-preview.png","本周工作安排.docx","project-files.zip","notes.md"].into_iter().map(std::path::PathBuf::from).collect();
         h.app.mail.accounts=vec![crate::mail::Account {custom: None, email:"product-team@example.com".into(),provider:crate::mail::Provider::Qq,enabled:true}];
         h.app.mail.recent=(0..3).map(|uid|crate::mail::Item {received_unix: None, account:"product-team@example.com".into(),from:"产品与设计协作团队".into(),subject:"请确认下阶段的设计方案和开发排期，评审前同步最新进度".into(),time:"11-01 09:41".into(),code:if uid==0{Some("123456".into())}else{None},summary:"这是一段邮件正文，需要确认当前需求与后续的产品设计安排。".repeat(20).into(),links:vec![],meeting:None,uid}).collect();
@@ -3828,7 +3844,7 @@ fn clock_12h_formats_boundaries_and_persists() {
     let text_rect=|label:&str|h.shapes.iter().find_map(|s|match &s.shape {
         egui::Shape::Text(t) if t.galley.text()==label=>Some(t.visual_bounding_rect()),_=>None,
     }).unwrap();
-    assert!(text_rect("+2").right()+8.0<text_rect("上午").left());
+    assert!(h.app.resident.current().x[crate::bar_layout::quota_slot(4)].unwrap()+WIN_W/2.0+13.5<text_rect("上午").left());
     h.hover(H::local(200.0,40.0),1.0);
     assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()=="9:41")));
     h.app.settings.clock_period=0;

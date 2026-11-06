@@ -92,25 +92,33 @@ fn decode(data:&[u8])->Option<Value>{
     let v=d.value(0)?;(d.pos==data.len()).then_some(v)
 }
 
-fn normalized(s:&str)->String{s.chars().flat_map(char::to_lowercase).filter(|c|c.is_alphanumeric()).collect()}
 fn select(value:&Value,title:&str,artist:&str,duration:f64)->Option<String>{
     let detail=value.pointer("/info/mediaDetail")?;let track=detail.get("playable")?;
-    if normalized(track.get("name")?.as_str()?)!=normalized(title){return None;}
+    let identity=super::song_identity(title,artist);
     let artists=track.get("artists")?.as_array()?.iter().map(|v|v.get("name")?.as_str()).collect::<Option<Vec<_>>>()?.join(",");
-    if super::artist_set(&artists).is_empty() || super::artist_set(&artists)!=super::artist_set(artist){return None;}
+    if identity.1.is_empty() || super::song_identity(track.get("name")?.as_str()?,&artists)!=identity{return None;}
     let actual=track.get("duration")?.as_f64()?/1000.0;
     if duration>0.0 && (actual-duration).abs()>2.0{return None;}
     let lyric=detail.get("lyrics")?;
     if !matches!(lyric.get("type")?.as_str()?,"krc"|"lrc"){return None;}
     lyric.get("content")?.as_str().filter(|s|!s.is_empty()).map(str::to_string)
 }
+fn path()->Option<std::path::PathBuf>{Some(std::path::PathBuf::from(std::env::var_os("APPDATA")?).join("SodaMusic/LunaCacheV2/entries.db"))}
+
+/// 缓存文件的修改时间与大小；没变化时轮询不再整份读取（文件最大 32MB）。
+pub fn fingerprint()->Option<(std::time::SystemTime,u64)>{
+    let meta=std::fs::metadata(path()?).ok()?;
+    Some((meta.modified().ok()?,meta.len()))
+}
+
 pub fn read(title:&str,artist:&str,duration:f64)->Option<String>{
-    let path=std::path::PathBuf::from(std::env::var_os("APPDATA")?).join("SodaMusic/LunaCacheV2/entries.db");
+    let path=path()?;
     // 复制快照后校验元页，客户端写入期间放弃本次读取，由后续轮询重试。
     use std::io::Read;
-    let mut file=std::fs::File::open(&path).ok()?;
+    let file=std::fs::File::open(&path).ok()?;
     if file.metadata().ok()?.len()>32*1024*1024{return None;}
-    let mut data=Vec::new();file.read_to_end(&mut data).ok()?;
+    let mut data=Vec::new();file.take(32*1024*1024+1).read_to_end(&mut data).ok()?;
+    if data.len()>32*1024*1024{return None;}
     let size=le(&data,48,4)?;if !(512..=65536).contains(&size){return None;}
     let mut headers=vec![0;size*2];std::fs::File::open(path).ok()?.read_exact(&mut headers).ok()?;
     if data.get(..headers.len())?!=headers{return None;}
@@ -125,6 +133,32 @@ mod tests {
         let v=serde_json::json!({"info":{"mediaDetail":{"playable":{"name":"合唱","artists":[{"name":"甲"},{"name":"乙"}],"duration":120000},"lyrics":{"type":"krc","content":"[1000,500]<0,500,0>词"}}}});
         assert!(select(&v,"合唱","乙/甲",120.0).is_some());
         for artist in ["甲","甲/丙",""] {assert!(select(&v,"合唱",artist,120.0).is_none());}
+    }
+    #[test]
+    #[ignore="只读验证本机汽水歌词缓存及合唱歌手顺序，不输出歌词正文"]
+    fn live_cached_metadata_variants(){
+        let path=std::path::PathBuf::from(std::env::var_os("APPDATA").unwrap()).join("SodaMusic/LunaCacheV2/entries.db");
+        let data=std::fs::read(path).unwrap();let mut count=0;
+        for entry in entries(&data).unwrap() {
+            let Some(value)=decode(entry) else{continue;};
+            let Some(track)=value.pointer("/info/mediaDetail/playable") else{continue;};
+            let Some(title)=track["name"].as_str() else{continue;};
+            let Some(artists)=track["artists"].as_array() else{continue;};
+            let mut names=artists.iter().filter_map(|a|a["name"].as_str()).collect::<Vec<_>>();
+            let duration=track["duration"].as_f64().unwrap_or_default()/1000.0;
+            let Some(raw)=select(&value,title,&names.join("/"),duration) else{continue;};
+            names.reverse();assert_eq!(select(&value,title,&names.join("、"),duration),Some(raw));count+=1;
+            if count==1 {assert!(read(title,&names.join("/"),duration).is_some());}
+        }
+        assert!(count>0);println!("汽水原生缓存：{count} 条歌词通过元数据及歌手顺序检查");
+    }
+    #[test] fn featured_credits_match_across_metadata_fields(){
+        let v=serde_json::json!({"info":{"mediaDetail":{"playable":{"name":"Track","artists":[{"name":"Artist"},{"name":"Guest"}],"duration":120000},"lyrics":{"type":"krc","content":"[1000,500]<0,500,0>词"}}}});
+        assert!(select(&v,"Track (feat. Guest)","Artist",120.0).is_some());
+        assert!(select(&v,"Track","Artist featuring Guest",120.0).is_some());
+        for (title,artist,duration) in [("Track (Live) feat. Guest","Artist",120.0),("Track feat. Other","Artist",120.0),("Track feat. Guest","Cover",120.0),("Track feat. Guest","Artist",150.0)] {
+            assert!(select(&v,title,artist,duration).is_none());
+        }
     }
     #[test] fn record_and_invalid_input(){
         let data=b"\xd4r\x40\x91\xa4name\xa4song";
