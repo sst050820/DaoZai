@@ -268,12 +268,66 @@ impl App {
             setting_row(ui,"AI 额度","每 3 分钟自动更新，可手动刷新",&mut self.quota.config.enabled);ui.separator();
             setting_row(ui,"收起时显示圆环","常驻账号最多显示 3 个，点击查看详情",&mut self.quota.config.compact);
         });
-        settings_label(ui,"账号");let mut remove=None;let mut reconnect=None;let mut gemini_reconnect=None;let mut reorder:Option<(String,String)>=None;
-        settings_card(ui,|ui|{
-            if self.quota.config.accounts.is_empty(){ui.label("还没有添加账号。可识别本机登录，或在下方连接其他账号。");}
-            for a in &mut self.quota.config.accounts{let row=ui.push_id(&a.id,|ui|{
-                ui.allocate_ui_with_layout(egui::vec2(ui.available_width(),30.0),egui::Layout::left_to_right(egui::Align::Center),|ui|{let handle=ui.add(egui::Label::new("::").sense(egui::Sense::drag()));handle.on_hover_text("拖动调整账号顺序").dnd_set_drag_payload(a.id.clone());ui.label(egui::RichText::new(a.provider.name()).strong());ui.add_sized([150.0,25.0],egui::TextEdit::singleline(&mut a.alias).vertical_align(egui::Align::Center).hint_text("账号备注"));if a.provider==Provider::GrokBot && ui.add_enabled(self.quota.login.is_none(),egui::Button::new("重新连接").small()).clicked(){reconnect=Some(a.alias.clone());}if a.provider==Provider::Gemini && ui.add_enabled(self.quota.gemini_connecting.is_none(),egui::Button::new("重新连接").small()).clicked(){gemini_reconnect=Some((a.alias.clone(),a.slot.clone()));}if ui.add_enabled(a.provider!=Provider::Gemini || self.quota.gemini_connecting.is_none(),egui::Button::new("移除").small()).clicked(){remove=Some(a.id.clone());}});
-                ui.horizontal(|ui|{ui.checkbox(&mut a.enabled,"监控");ui.checkbox(&mut a.pinned,"常驻刘海");if ui.selectable_label(self.quota.config.selected==a.id,"当前账号").clicked(){self.quota.config.selected=a.id.clone();}});
+        let mut remove=None;let mut reconnect=None;let mut gemini_reconnect=None;let mut reorder:Option<(String,String)>=None;
+        let scroll_to_add=egui::Id::new("quota-scroll-to-add");
+        ui.add_space(10.0);
+        ui.horizontal_wrapped(|ui|{
+            if ui.button("＋ 添加账号").clicked(){ui.ctx().data_mut(|d|d.insert_temp(scroll_to_add,true));}
+            if ui.button("识别本机账号").clicked(){self.quota.note=self.quota.config.discover().message();}
+            if ui.add_enabled(self.quota.busy.is_empty(),egui::Button::new("刷新额度")).clicked(){self.pending.push(Cmd::QuotaRefresh);}
+        });ui.add_space(8.0);
+        if self.quota.config.accounts.is_empty(){ui.label("还没有添加账号。可识别本机登录，或在下方连接其他账号。");}
+        for a in &mut self.quota.config.accounts{
+            // 颜色在闭包外算好：这里直接借用 &mut accounts，闭包内不能再借整个 config。
+            let accent=self.quota.config.colors.get(&a.id).copied().unwrap_or_default();
+            let ring_color=crate::paint::mix(accent_color(accent,a.provider),Color32::BLACK,0.75);
+            let bar_color=accent_color(accent,a.provider);
+            let fill=crate::settings_theme::color(ui.ctx(),Color32::from_rgb(35,35,38),Color32::WHITE);
+            let card=egui::Frame::new().fill(fill).corner_radius(10.0).inner_margin(egui::Margin::symmetric(16,12)).show(ui,|ui|{
+                ui.set_width((ui.available_width()-1.0).max(0.0));ui.spacing_mut().item_spacing.y=6.0;
+                ui.push_id(&a.id,|ui|{
+                ui.horizontal(|ui|{
+                    ui.add(egui::Label::new("::").sense(egui::Sense::drag())).on_hover_text("拖动调整账号顺序").dnd_set_drag_payload(a.id.clone());
+                    let (rect,_)=ui.allocate_exact_size(egui::vec2(26.0,28.0),egui::Sense::hover());
+                    let c=Card::new(ui,rect.min,ui.clip_rect());
+                    c.circle(13.0,14.0,13.0,ring_color);
+                    logo(&c,a.provider,13.0,14.0,20.0);
+                    ui.label(egui::RichText::new(a.provider.name()).strong());
+                    // 从右往左排：按钮先靠右放好，名称输入框占用剩余宽度。
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{
+                        if ui.add_enabled(a.provider!=Provider::Gemini || self.quota.gemini_connecting.is_none(),egui::Button::new("移除")).clicked(){remove=Some(a.id.clone());}
+                        if ui.selectable_label(self.quota.config.selected==a.id,"当前").clicked(){self.quota.config.selected=a.id.clone();}
+                        ui.add_sized([ui.available_width().max(55.0),26.0],egui::TextEdit::singleline(&mut a.alias).hint_text("账号名称")).on_hover_text("直接修改账号名称");
+                    });
+                });
+                let result=self.quota.rows.get(&a.id);
+                let snapshot=result.and_then(|r|r.as_ref().ok());
+                let error=result.and_then(|r|r.as_ref().err());
+                if let Some(s)=snapshot{
+                    let rings=s.rings();let count=rings.len().max(1);let width=(ui.available_width()-12.0*(count-1) as f32)/count as f32;
+                    ui.horizontal_top(|ui|{ui.spacing_mut().item_spacing.x=12.0;for window in rings{
+                        ui.allocate_ui_with_layout(egui::vec2(width,30.0),egui::Layout::top_down(egui::Align::Min),|ui|{
+                            ui.horizontal(|ui|{ui.label(egui::RichText::new(format!("{}  剩余 {:.0}%",window.label,window.remaining)).size(11.0));});
+                            ui.add(egui::ProgressBar::new((window.remaining/100.0).clamp(0.0,1.0)).desired_width(width).desired_height(3.0).fill(bar_color));
+                        });
+                    }});
+                }
+                if !a.enabled{ui.label(egui::RichText::new("已暂停监控").size(11.0).color(ui.visuals().weak_text_color()));}
+                else if let Some(error)=error{ui.add(egui::Label::new(egui::RichText::new(error).size(11.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_rgb(231,175,108),Color32::from_rgb(151,94,28)))).wrap());}
+                else if snapshot.is_none(){ui.label(egui::RichText::new(if self.quota.busy.contains(&a.id){"正在查询额度…"}else{"等待更新"}).size(11.0).color(ui.visuals().weak_text_color()));}
+                ui.horizontal_wrapped(|ui|{
+                    ui.checkbox(&mut a.enabled,"监控");ui.checkbox(&mut a.pinned,"常驻岛上");
+                    if ui.add_enabled(!self.quota.busy.contains(&a.id),egui::Button::new(if error.is_some(){"重试"}else{"刷新"})).clicked(){self.pending.push(Cmd::QuotaRefresh);}
+                    if ui.button("重新连接").clicked(){match a.provider{
+                        Provider::GrokBot=>reconnect=Some(a.alias.clone()),
+                        Provider::Gemini=>gemini_reconnect=Some((a.alias.clone(),a.slot.clone())),
+                        _=>{ui.ctx().data_mut(|d|d.insert_temp(scroll_to_add,true));},
+                    }}
+                    if let Some(s)=snapshot{
+                        let time=chrono::DateTime::from_timestamp(s.at,0).map(|at|at.with_timezone(&chrono::Local).format("%H:%M").to_string()).unwrap_or_default();
+                        ui.label(egui::RichText::new(format!("{time} 更新")).size(10.0).color(ui.visuals().weak_text_color()));
+                    }
+                });
                 let mut color=self.quota.config.colors.get(&a.id).copied().unwrap_or_default();color_picker(ui,a.provider,&mut color);if color==Accent::Brand{self.quota.config.colors.remove(&a.id);}else{self.quota.config.colors.insert(a.id.clone(),color);}
                 // 绝对值来源要有分母才能画进度：余额画「余额 / 总额」，积分画「已用 / 总量」。
                 if matches!(a.provider,Provider::Harness|Provider::WorkBuddy){
@@ -289,21 +343,24 @@ impl App {
                         ui.label(egui::RichText::new(hint).size(11.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_gray(170),Color32::from_gray(85))));
                     });
                 }
-                let source=if a.provider==Provider::Gemini{"Gemini 网页订阅 · Windows 加密保存".into()}else if a.provider==Provider::GrokBot{if a.source.as_os_str().is_empty(){"浏览器登录 · Windows 安全存储".into()}else{"Grok Bot 本机登录".into()}}else{a.source.to_string_lossy()};
-                ui.label(egui::RichText::new(source).size(11.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_gray(170),Color32::from_gray(85))));
-                let message=if self.quota.busy.contains(&a.id){"正在更新…".into()}else{match self.quota.rows.get(&a.id){Some(Ok(s))=>format!("已更新 · {} 个额度周期",s.windows.len()),Some(Err(e))=>e.clone(),None=>"等待更新".into()}};ui.label(egui::RichText::new(message).size(11.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_gray(170),Color32::from_gray(85))));ui.add_space(6.0);
-                }).response;
-                if row.dnd_hover_payload::<String>().is_some(){ui.painter().rect_stroke(row.rect,10.0,egui::Stroke::new(2.0,ui.visuals().selection.bg_fill),egui::StrokeKind::Inside);}
-                if let Some(from)=row.dnd_release_payload::<String>(){reorder=Some(((*from).clone(),a.id.clone()));}
-            }
-            ui.horizontal(|ui|{if ui.button("识别本机账号").clicked(){self.quota.note=self.quota.config.discover().message();}if ui.add_enabled(self.quota.busy.is_empty(),egui::Button::new("刷新额度")).clicked(){self.pending.push(Cmd::QuotaRefresh);}});
-            ui.label(egui::RichText::new("本机识别支持 Codex、Claude 桌面版与 Code、Kimi Code、Grok Bot、WorkBuddy、DeepSeek Harness；Gemini 请连接浏览器。").size(12.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_gray(180),Color32::from_gray(75))));
-        });
+                // 登录来源说明与「已更新 · N 个额度周期」按原版去掉；状态改由上方错误提示与「HH:MM 更新」呈现。
+                });
+            });
+            if card.response.dnd_hover_payload::<String>().is_some(){ui.painter().rect_stroke(card.response.rect,10.0,egui::Stroke::new(2.0,ui.visuals().selection.bg_fill),egui::StrokeKind::Inside);}
+            if let Some(from)=card.response.dnd_release_payload::<String>(){reorder=Some(((*from).clone(),a.id.clone()));}
+            ui.add_space(8.0);
+        }
+        ui.add_space(8.0);
         if let Some(id)=remove{if let Some(account)=self.quota.config.accounts.iter().find(|a|a.id==id){match account.provider{Provider::GrokBot=>{quota::grok::forget(account);self.quota.login=None;},Provider::Gemini=>quota::gemini::forget(account),_=>{}}}self.quota.config.accounts.retain(|a|a.id!=id);self.quota.config.colors.remove(&id);self.quota.config.caps.remove(&id);self.quota.rows.remove(&id);self.quota.busy.remove(&id);if self.quota.config.selected==id{self.quota.config.selected=self.quota.config.accounts.first().map(|a|a.id.clone()).unwrap_or_default();}}
         if let Some(alias)=reconnect{self.quota_login(alias);}
         if let Some((alias,slot))=gemini_reconnect{self.quota.gemini_connecting=Some(quota::gemini::Connect::start(alias,String::new(),None,slot));}
         if let Some((from,to))=reorder{self.quota.config.move_account(&from,&to);}
-        settings_label(ui,"添加其他账号");settings_card(ui,|ui|{
+        settings_label(ui,"添加其他账号");
+        if ui.ctx().data(|d|d.get_temp::<bool>(scroll_to_add).unwrap_or(false)){
+            ui.ctx().data_mut(|d|d.insert_temp(scroll_to_add,false));
+            ui.scroll_to_cursor(Some(egui::Align::Min));
+        }
+        settings_card(ui,|ui|{
             settings_control_row(ui,"服务",56.0,|ui|{egui::ComboBox::from_id_salt("quota-provider").selected_text(self.quota.provider.name()).show_ui(ui,|ui|{for p in Provider::ALL{ui.selectable_value(&mut self.quota.provider,p,p.name());}}).response});
             settings_control_row(ui,"备注",56.0,|ui|{ui.add_sized([ui.available_width(),27.0],egui::TextEdit::singleline(&mut self.quota.alias).vertical_align(egui::Align::Center).hint_text("例如：个人、工作、备用"))});
             if self.quota.provider==Provider::Gemini{
