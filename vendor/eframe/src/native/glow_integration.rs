@@ -676,6 +676,12 @@ impl GlowWinitRunning<'_> {
             &textures_delta,
         );
 
+        // 默认走 ULW；DAOZAI_NO_ULW=1 可退回原生 swapchain（在 DWM 正常读 alpha 的机器上用）。
+        #[cfg(target_os = "windows")]
+        let ulw_on = std::env::var_os("DAOZAI_NO_ULW").is_none();
+        #[cfg(not(target_os = "windows"))]
+        let ulw_on = false;
+
         {
             for action in viewport.actions_requested.drain() {
                 match action {
@@ -710,6 +716,14 @@ impl GlowWinitRunning<'_> {
                 }
             }
 
+            #[cfg(target_os = "windows")]
+            if ulw_on {
+                let img = painter.read_screen_rgba(screen_size_in_pixels);
+                if let Some(hwnd) = win32_hwnd(&window) {
+                    ulw_present::present(hwnd, &img);
+                }
+            }
+
             integration.post_rendering(&window);
         }
 
@@ -723,7 +737,7 @@ impl GlowWinitRunning<'_> {
                     "failed to get current context to swap buffers".to_owned(),
                 ))?;
 
-            gl_surface.swap_buffers(context)?;
+            if !ulw_on { gl_surface.swap_buffers(context)?; }
             frame_timer.resume();
         }
 
@@ -1603,3 +1617,127 @@ fn save_screenshot_and_exit(
     #[allow(clippy::exit)]
     std::process::exit(0);
 }
+
+// ---------------------------------------------------------------------------
+// WB-FIX: UpdateLayeredWindow 呈现路径。
+// 某些 Win10/11 + WGL 组合下 DWM 完全忽略 GL 帧缓冲的 alpha（透明区变纯黑）。
+// 这里改成每帧把已绘制好的帧缓冲读回成带 alpha 的 DIB，用 ULW 自行合成，
+// 不再依赖 DWM 读取 swapchain alpha。默认启用，DAOZAI_NO_ULW=1 可关闭。
+// ---------------------------------------------------------------------------
+#[cfg(target_os = "windows")]
+#[allow(unsafe_code)]
+mod ulw_present {
+    use std::cell::RefCell;
+    use std::ffi::c_void;
+
+    #[repr(C)]
+    struct BmiHeader {
+        size: u32, width: i32, height: i32, planes: u16, bit_count: u16,
+        compression: u32, size_image: u32, xppm: i32, yppm: i32,
+        clr_used: u32, clr_important: u32,
+    }
+    #[repr(C)]
+    struct Bmi { header: BmiHeader, colors: u32 }
+    #[repr(C)]
+    struct Blend { op: u8, flags: u8, alpha: u8, format: u8 }
+    #[repr(C)]
+    struct Point { x: i32, y: i32 }
+    #[repr(C)]
+    struct Size { cx: i32, cy: i32 }
+    #[repr(C)]
+    #[derive(Default)]
+    struct Rect { l: i32, t: i32, r: i32, b: i32 }
+
+    #[link(name = "gdi32")]
+    extern "system" {
+        fn CreateCompatibleDC(hdc: isize) -> isize;
+        fn CreateDIBSection(hdc: isize, bmi: *const Bmi, usage: u32,
+                            bits: *mut *mut c_void, section: isize, offset: u32) -> isize;
+        fn SelectObject(dc: isize, obj: isize) -> isize;
+        fn DeleteObject(obj: isize) -> i32;
+        fn DeleteDC(dc: isize) -> i32;
+    }
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetDC(hwnd: isize) -> isize;
+        fn ReleaseDC(hwnd: isize, dc: isize) -> i32;
+        fn GetWindowRect(hwnd: isize, rect: *mut Rect) -> i32;
+        fn UpdateLayeredWindow(hwnd: isize, dc_dst: isize, pt_dst: *const Point,
+                               size: *const Size, dc_src: isize, pt_src: *const Point,
+                               key: u32, blend: *const Blend, flags: u32) -> i32;
+    }
+
+    struct Surface { mem: isize, bmp: isize, bits: *mut u8, w: i32, h: i32 }
+    thread_local! { static CACHE: RefCell<Option<Surface>> = const { RefCell::new(None) }; }
+
+    pub fn present(hwnd: isize, img: &egui::ColorImage) {
+        let w = img.width() as i32;
+        let h = img.height() as i32;
+        if w <= 0 || h <= 0 { return; }
+        CACHE.with(|cell| {
+            let mut opt = cell.borrow_mut();
+            if opt.as_ref().map_or(true, |s| s.w != w || s.h != h) {
+                if let Some(s) = opt.take() {
+                    unsafe { DeleteObject(s.bmp); DeleteDC(s.mem); }
+                }
+                unsafe {
+                    let screen = GetDC(0);
+                    let mem = CreateCompatibleDC(screen);
+                    ReleaseDC(0, screen);
+                    let mut bits: *mut c_void = std::ptr::null_mut();
+                    let bmi = Bmi {
+                        header: BmiHeader {
+                            size: std::mem::size_of::<BmiHeader>() as u32,
+                            width: w, height: h, planes: 1, bit_count: 32,
+                            compression: 0, size_image: 0, xppm: 0, yppm: 0,
+                            clr_used: 0, clr_important: 0,
+                        },
+                        colors: 0,
+                    };
+                    let bmp = CreateDIBSection(mem, &bmi, 0, &mut bits, 0, 0);
+                    if bmp == 0 || bits.is_null() { return; }
+                    SelectObject(mem, bmp);
+                    *opt = Some(Surface { mem, bmp, bits: bits as *mut u8, w, h });
+                }
+            }
+            let Some(s) = opt.as_ref() else { return; };
+            unsafe {
+                let stride = (w as usize) * 4;
+                let px = &img.pixels;
+                for y in 0..h {
+                    let dst = s.bits.add(((h - 1 - y) as usize) * stride);
+                    for x in 0..w {
+                        let c = px[(y as usize) * (w as usize) + (x as usize)];
+                        let a = c.a() as u32;
+                        // ULW + AC_SRC_ALPHA 要求预乘 alpha；未预乘会让半透明边缘发白。
+                        let scale = |v: u8| ((v as u32 * a) / 255) as u8;
+                        let o = (x as usize) * 4;
+                        *dst.add(o) = scale(c.b());
+                        *dst.add(o + 1) = scale(c.g());
+                        *dst.add(o + 2) = scale(c.r());
+                        *dst.add(o + 3) = c.a();
+                    }
+                }
+                let mut rect = Rect::default();
+                if GetWindowRect(hwnd, &mut rect) == 0 { return; }
+                let pt_dst = Point { x: rect.l, y: rect.t };
+                let sz = Size { cx: w, cy: h };
+                let pt_src = Point { x: 0, y: 0 };
+                // AC_SRC_OVER / SourceConstantAlpha=255 / AC_SRC_ALPHA => 逐像素 alpha
+                let blend = Blend { op: 0, flags: 0, alpha: 255, format: 1 };
+                let screen = GetDC(0);
+                let _ = UpdateLayeredWindow(hwnd, screen, &pt_dst, &sz, s.mem, &pt_src, 0, &blend, 2);
+                ReleaseDC(0, screen);
+            }
+        });
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn win32_hwnd(window: &Window) -> Option<isize> {
+    match window.window_handle().ok()?.as_raw() {
+        raw_window_handle::RawWindowHandle::Win32(h) => Some(h.hwnd.get()),
+        _ => None,
+    }
+}
+
