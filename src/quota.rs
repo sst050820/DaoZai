@@ -188,6 +188,12 @@ impl Config {
     }
     pub fn selected_index(&self)->Option<usize>{self.accounts.iter().position(|a|a.id==self.selected && a.enabled).or_else(||self.accounts.iter().position(|a|a.enabled))}
     pub fn pinned_indices(&self)->Vec<usize>{self.accounts.iter().enumerate().filter_map(|(i,a)|(a.enabled && a.pinned).then_some(i)).collect()}
+    /// 设置页里拖动账号卡片时按 id 移动整个 Account。caps/colors/selected 都按 id 关联，不随位置变化。
+    pub fn move_account(&mut self,from:&str,to:&str){
+        if let (Some(source),Some(target))=(self.accounts.iter().position(|a|a.id==from),self.accounts.iter().position(|a|a.id==to)){
+            let account=self.accounts.remove(source);self.accounts.insert(target,account);
+        }
+    }
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct Window {pub label:String,pub seconds:Option<i64>,pub remaining:f32,pub reset:Option<i64>}
@@ -326,6 +332,17 @@ fn fetch(agent:&ureq::Agent,account:&Account)->Result<Snapshot,(String,u64)>{
 
 #[cfg(test)] mod tests {
     use super::*;
+    #[test]
+    fn move_account_reorders_by_id_without_touching_caps_colors_or_selection(){
+        let mut c=Config::default();
+        for id in ["A","B","C"]{c.accounts.push(Account{id:id.into(),provider:Provider::Codex,alias:id.into(),source:PathBuf::from(format!("{id}.json")),slot:None,enabled:true,pinned:true});}
+        c.selected="B".into();c.caps.insert("B".into(),50.0);c.colors.insert("C".into(),Accent::Gold);
+        c.move_account("A","C");
+        assert_eq!(c.accounts.iter().map(|a|a.id.as_str()).collect::<Vec<_>>(),vec!["B","C","A"]);
+        assert_eq!(c.selected,"B");assert_eq!(c.caps.get("B"),Some(&50.0));assert_eq!(c.colors.get("C"),Some(&Accent::Gold));
+        c.move_account("missing","A");c.move_account("A","A");
+        assert_eq!(c.accounts.iter().map(|a|a.id.as_str()).collect::<Vec<_>>(),vec!["B","C","A"],"不存在的 id 与原地拖放都不应改变顺序");
+    }
     #[test]
     fn native_discovery_keeps_distinct_accounts_and_does_not_change_their_files(){
         let dir=std::env::temp_dir().join(format!("daozai-discovery-{}",std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
