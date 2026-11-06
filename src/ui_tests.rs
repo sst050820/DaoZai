@@ -3612,6 +3612,8 @@ fn settings_theme_follows_system_and_preserves_island_style() {
         });
         for tab in 0..12 {
             h.app.settings_tab=tab;
+            // 添加账号表单已移入弹窗：tab 11 需先打开弹窗，布局断言才能看到表单文字。
+            if tab==11{h.app.quota.connect_open=true;}
             for frame in 0..3 {
                 h.ctx.data_mut(|d|d.insert_temp(egui::Id::new("settings-system-theme"),(std::time::Instant::now(),system)));
                 let root=h.ctx.run(Default::default(),|ctx|h.app.settings_ui(ctx,false));
